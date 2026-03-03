@@ -646,6 +646,34 @@ class TestTableElements(TestCase, TableElementTestingToolMixin):
             expected_none_hover_text="No link",
         )
 
+    def test_external_link_table_element__add_scheme(self):
+        test_element = te.ExternalLinkTableElement(
+            name="name",
+            attr="test_attr",
+        )
+        self.table_element_test_assertions_from_value(
+            table_element=test_element,
+            value="www.google.com",
+            expected_format='<a href="https://www.google.com" target="_blank">https://www.google.com</a>',
+            expected_format_latex=" \\url{https://www.google.com} &",
+            expected_hover_text="https://www.google.com",
+            expected_none_hover_text="No link",
+        )
+
+    def test_external_link_table_element__add_scheme_with_port(self):
+        test_element = te.ExternalLinkTableElement(
+            name="name",
+            attr="test_attr",
+        )
+        self.table_element_test_assertions_from_value(
+            table_element=test_element,
+            value="www.google.com:8080",
+            expected_format='<a href="https://www.google.com:8080" target="_blank">https://www.google.com:8080</a>',
+            expected_format_latex=" \\url{https://www.google.com:8080} &",
+            expected_hover_text="https://www.google.com:8080",
+            expected_none_hover_text="No link",
+        )
+
     def test_latex_special_character_is_handled(self):
         table_element = te.StringTableElement(
             name="name",
