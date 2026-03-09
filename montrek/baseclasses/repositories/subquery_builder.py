@@ -17,15 +17,20 @@ from baseclasses.models import (
 from django.conf import settings
 from django.db import models
 from django.db.models import (
+    BooleanField,
+    Case,
     CharField,
     F,
     ExpressionWrapper,
     Func,
+    IntegerField,
     OuterRef,
     Q,
     QuerySet,
     Subquery,
     Sum,
+    Value,
+    When,
 )
 from django.db.models.functions import Cast
 from django.utils import timezone
@@ -428,21 +433,23 @@ class LinkedSatelliteSubqueryBuilderBase(SatelliteSubqueryBuilderABC):
         }
 
     def _annotate_agg_field(self, hub_field_to: str, query: QuerySet) -> QuerySet:
-        if self._is_multiple_allowed(hub_field_to):
-            if self.agg_func == LinkAggFunctionEnum.SUM:
-                return self._annotate_sum(query)
-            if self.agg_func == LinkAggFunctionEnum.STRING_CONCAT:
-                return self._annotate_string_concat(query, self.separator)
-            if self.agg_func == LinkAggFunctionEnum.LATEST:
-                return self._annotate_latest(query)
-            if self.agg_func == LinkAggFunctionEnum.MEAN:
-                return self._annotate_mean(query)
-            if self.agg_func == LinkAggFunctionEnum.COUNT:
-                return self._annotate_count(query)
+        if not self._is_multiple_allowed(hub_field_to):
+            return query
+        annotators = {
+            LinkAggFunctionEnum.SUM: lambda q: self._annotate_sum(q),
+            LinkAggFunctionEnum.STRING_CONCAT: lambda q: self._annotate_string_concat(
+                q, self.separator
+            ),
+            LinkAggFunctionEnum.LATEST: lambda q: self._annotate_latest(q),
+            LinkAggFunctionEnum.MEAN: lambda q: self._annotate_mean(q),
+            LinkAggFunctionEnum.COUNT: lambda q: self._annotate_count(q),
+            LinkAggFunctionEnum.ALL: lambda q: self._annotate_all(q),
+        }
+        if self.agg_func not in annotators:
             raise NotImplementedError(
                 f"Aggregation function {self.agg_func} is not implemented!"
             )
-        return query
+        return annotators[self.agg_func](query)
 
     def _annotate_sum(self, query: QuerySet) -> QuerySet:
         return query.annotate(
@@ -482,6 +489,46 @@ class LinkedSatelliteSubqueryBuilderBase(SatelliteSubqueryBuilderABC):
                 self.field + "agg": Func(self.field + "sub", function="Count"),
             }
         ).values(self.field + "agg")
+
+    def _annotate_all(self, query: QuerySet) -> QuerySet:
+        # Map each value to 1 (truthy) or 0 (falsy), then take MIN across all rows.
+        # MIN = 1 iff every value was truthy → True; any falsy value → MIN = 0 → False.
+        # Only explicit False/0 is treated as falsy. NULL (no matching satellite, e.g.
+        # excluded by a CrossSatelliteFilter) is skipped, consistent with how SQL
+        # aggregates handle NULL (they ignore NULL values).
+        # A separate Q is used instead of __in=[False, 0] to avoid type-coercion errors
+        # when the field is e.g. IntegerField (which rejects "").
+        falsy_condition = Q(**{f"{self.field}sub": False})
+        min_field = f"{self.field}_all_min"
+        return (
+            query.annotate(
+                **{
+                    min_field: Func(
+                        Case(
+                            When(falsy_condition, then=Value(0)),
+                            default=Value(1),
+                            output_field=IntegerField(),
+                        ),
+                        function="Min",
+                    )
+                }
+            )
+            .annotate(
+                **{
+                    self.field
+                    + "agg": Case(
+                        When(
+                            **{f"{min_field}__isnull": True},
+                            then=Value(None, output_field=BooleanField()),
+                        ),
+                        When(**{min_field: 0}, then=Value(False)),
+                        default=Value(True),
+                        output_field=BooleanField(),
+                    )
+                }
+            )
+            .values(self.field + "agg")
+        )
 
     def _is_multiple_allowed(self, hub_field_to: str) -> bool:
         _is_many_to_many = isinstance(self.link_class(), MontrekManyToManyLinkABC)
@@ -564,3 +611,4 @@ class LinkAggFunctionEnum(Enum):
     LATEST = "latest"
     MEAN = "mean"
     COUNT = "count"
+    ALL = "all"
