@@ -19,7 +19,7 @@ from django.urls import reverse_lazy
 from reporting.core.reporting_colors import ReportingColors
 
 from montrek.filtered_warnings import add_filtered_warnings
-from montrek.utils import get_keycloak_base_url, get_oidc_endpoints
+from montrek.utils import SystemFormatting, get_keycloak_base_url, get_oidc_endpoints
 
 add_filtered_warnings()
 
@@ -135,6 +135,7 @@ DJANGO_MIDDLEWARE = [
     "debug_toolbar.middleware.DebugToolbarMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -270,16 +271,18 @@ else:
 LOGIN_REDIRECT_URL = reverse_lazy("home")
 
 
+# Number formatting
+NUMBER_FORMATTING = SystemFormatting(config("NUMBER_FORMATTING", default="en"))
+
 # Internationalization
 # https://docs.djangoproject.com/en/4.2/topics/i18n/
-
-LANGUAGE_CODE = "en-us"
 
 TIME_ZONE = "UTC"
 
 USE_I18N = True
 
 USE_TZ = True
+LANGUAGE_CODE = config("LANGUAGE_CODE", default="en-us")
 
 
 # Static files (CSS, JavaScript, Images)
