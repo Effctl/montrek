@@ -3,7 +3,14 @@ set -euo pipefail
 set -x
 
 echo "Syncing Python environment with uv..."
-uv venv
+
+# Create .venv only if it does not already exist.
+# This avoids permission errors when stale files exist in an existing venv.
+if [ ! -d ".venv" ]; then
+  uv venv
+else
+  echo "Using existing .venv"
+fi
 
 # Combine all requirements.in files into one
 temporary_requirements_file="all_requirements.in"

@@ -1,4 +1,7 @@
 SECURE_WRAPPER := bash bin/secrets/secure-wrapper.sh
+UV_PYTHON = $(shell pyenv which python 2>/dev/null || command -v python3 || command -v python)
+TMUX_LOCAL_DEV_SESSION ?= montrek-local-dev
+export UV_PYTHON
 
 .PHONY: help
 help: # Show help for each of the Makefile recipes.
@@ -11,6 +14,80 @@ local-init: # Install local python environment and necessary packages
 .PHONY: local-runserver
 local-runserver: # Run the montrek django app locally (non-docker).
 	@$(SECURE_WRAPPER) bin/local/runserver.sh
+
+.PHONY: local-infra-up
+local-infra-up: # Start the local infrastructure in dev mode (database and redis in docker)
+	@echo "Starting local infrastructure in dev mode (Redis + DB in docker)..."
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	docker compose -f docker-compose.yml -f "$${LOCAL_DEV_COMPOSE_FILE:-docker-compose.local-dev.yml}" up -d redis db
+
+.PHONY: local-infra-down
+local-infra-down: # Stop the local infrastructure in dev mode (database and redis in docker)
+	@echo "Stopping local infrastructure in dev mode (Redis + DB in docker)..."
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	docker compose -f docker-compose.yml -f "$${LOCAL_DEV_COMPOSE_FILE:-docker-compose.local-dev.yml}" stop redis db
+
+.PHONY: local-worker-debug
+local-worker-debug: # Run the montrek worker in debug mode locally (non-docker).
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo "Starting Celery worker with PyCharm debugging on port $${PYCHARM_DEBUG_PORT:-5678} using $$UV_PYTHON (unbuffered stdout, solo pool)..."; \
+	PYTHONUNBUFFERED=1 "$$UV_PYTHON" -Xfrozen_modules=off bin/local/run_worker_debug.py
+
+.PHONY: local-preflight
+local-preflight: # Check local dev ports and fail fast if they are in use.
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	APP_PORT_TO_CHECK="$${LOCAL_APP_PORT:-$${APP_PORT:-8000}}"; \
+	echo "Checking local ports: app=$$APP_PORT_TO_CHECK"; \
+	if lsof -tiTCP:"$$APP_PORT_TO_CHECK" -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "Port $$APP_PORT_TO_CHECK is already in use by PID(s): $$(lsof -tiTCP:$$APP_PORT_TO_CHECK -sTCP:LISTEN | tr '\n' ' ')"; \
+		exit 1; \
+	fi
+
+.PHONY: local-stop
+local-stop: # Stop local tmux session and dockerized web processes that can conflict with local dev.
+	@echo "Stopping local dev tmux session (if running)..."
+	@tmux has-session -t "$(TMUX_LOCAL_DEV_SESSION)" 2>/dev/null && tmux kill-session -t "$(TMUX_LOCAL_DEV_SESSION)" || true
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	APP_PORT_TO_STOP="$${LOCAL_APP_PORT:-$${APP_PORT:-8000}}"; \
+	echo "Stopping local listeners on port $$APP_PORT_TO_STOP (if running)..."; \
+	for p in "$$APP_PORT_TO_STOP"; do \
+		pids="$$(lsof -tiTCP:$$p -sTCP:LISTEN 2>/dev/null | tr '\n' ' ')"; \
+		if [ -n "$$pids" ]; then \
+			echo "Killing PID(s) on port $$p: $$pids"; \
+			kill $$pids >/dev/null 2>&1 || true; \
+		fi; \
+	done
+	@echo "Stopping containerized web services that can conflict with local Django..."
+	@docker compose stop web nginx flower celery_beat sequential_worker parallel_worker fast_worker >/dev/null 2>&1 || true
+
+.PHONY: install-worker-debugger
+install-worker-debugger: # Install debugger helpers used by local-worker-debug.
+	@echo "Installing PyCharm debugger helper into local Python environment with uv using $$UV_PYTHON..."
+	@uv pip install --python "$$UV_PYTHON" --upgrade pydevd-pycharm
+	@"$$UV_PYTHON" -c "import sys, pydevd_pycharm; print('python:', sys.executable); print('pydevd_pycharm import:', pydevd_pycharm.__name__)"
+	@echo "PyCharm debugger helper installation complete."
+
+.PHONY: local-dev
+local-dev: # Use pyenv montrek-3.12.0 and start full local dev
+	@echo "▶ Setting pyenv local version to montrek-3.12.0..."
+	@pyenv local montrek-3.12.0
+	@$(eval UV_PYTHON = $(shell pyenv which python))
+	@echo "▶ Using UV_PYTHON=$(UV_PYTHON)"
+	@$(MAKE) local-stop
+	@echo "▶ Syncing local Python virtual environment..."
+	@$(MAKE) sync-local-python-env
+	@echo "▶ Installing PyCharm debugger helper..."
+	@$(MAKE) install-worker-debugger
+	@echo "▶ Running local preflight checks..."
+	@$(MAKE) local-preflight
+	@echo "▶ Launching full local development environment..."
+	@tmux new-session -d -s "$(TMUX_LOCAL_DEV_SESSION)" \; \
+		send-keys '$(MAKE) local-infra-up' C-m \; \
+		split-window -v \; \
+		send-keys '$(MAKE) local-runserver' C-m \; \
+		split-window -h \; \
+		send-keys '$(MAKE) local-worker-debug' C-m
+	@tmux attach-session -t "$(TMUX_LOCAL_DEV_SESSION)"
 
 .PHONY: sync-local-python-env
 sync-local-python-env: # Sync the local (non-docker) python environment with the requirements specified in the montrek repositories.

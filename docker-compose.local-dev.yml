@@ -1,0 +1,5 @@
+services:
+  redis:
+    # Expose Redis only for host-run local dev processes.
+    ports:
+      - "${LOCAL_REDIS_PORT:-6379}:6379"
