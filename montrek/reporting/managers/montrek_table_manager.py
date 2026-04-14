@@ -151,16 +151,28 @@ class MontrekTableManagerABC(MontrekManager, metaclass=MontrekTableMetaClass):
     def to_excel(
         self, output: HttpResponse | BytesIO | str, sheet_name: str = "Montrek Data"
     ) -> HttpResponse | BytesIO | str:
-        table_df = self.get_df()
+        table_df = self.get_output_df()
+        col_formats = self._get_excel_col_formats()
         with pd.ExcelWriter(output, engine="openpyxl") as excel_writer:
             table_df.to_excel(excel_writer, index=False, sheet_name=sheet_name)
-            self.excel_formatter_class.format_excel(excel_writer, sheet_name=sheet_name)
+            self.excel_formatter_class().format_excel(
+                excel_writer, sheet_name=sheet_name, col_formats=col_formats
+            )
         return output
 
+    def _get_excel_col_formats(self) -> dict[int, str | None]:
+        elements = [
+            e for e in self.table_elements if not isinstance(e, te.LinkTableElement)
+        ]
+        return {idx: e.excel_format_str for idx, e in enumerate(elements)}
+
     def to_csv(self, output: HttpResponse | str) -> HttpResponse | str:
-        table_df = self.get_df()
+        table_df = self.get_output_df()
         table_df.to_csv(output, index=False)
         return output
+
+    def get_output_df(self) -> pd.DataFrame:
+        return self.get_df()
 
     def download_or_mail_csv(self) -> HttpResponse:
         return self._download_or_mail("csv", self._download_csv)
@@ -300,14 +312,24 @@ class MontrekTableManager(MontrekTableManagerABC):
         return max(paginate_by, 5)
 
     def get_table(self) -> QuerySet | dict:
-        return self._get_queryset(self.get_paginated_queryset)
+        queryset = self._get_queryset(self.get_paginated_queryset)
+        self._preload_container(queryset)
+        return queryset
 
     def get_full_table(self) -> QuerySet | dict:
         self.set_order_field()
         return self.repository.receive()
 
     def get_df(self) -> pd.DataFrame:
-        queryset = list(self.repository.receive())
+        queryset = self.repository.receive()
+        self._preload_container(queryset)
+        queryset = list(queryset)
+        return self._build_df(queryset)
+
+    def _preload_container(self, queryset: QuerySet | dict) -> None:
+        """Hook for subclasses to bulk-prefetch data before row iteration."""
+
+    def _build_df(self, queryset: list) -> pd.DataFrame:
         table_data = {}
         table_elements = [
             table_element
@@ -326,7 +348,7 @@ class MontrekTableManager(MontrekTableManagerABC):
             return self._paginate_queryset(queryset)
         return queryset
 
-    def _paginate_queryset(self, queryset):
+    def _paginate_queryset(self, queryset: QuerySet | dict):
         page_number = int(self.session_data.get("page", [1])[0])
         paginate_by = self.paginate_by
         offset = (page_number - 1) * paginate_by

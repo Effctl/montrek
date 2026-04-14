@@ -2,17 +2,18 @@ import collections
 import datetime
 import inspect
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 from typing import Any, ClassVar, TypeVar
-from collections.abc import Iterable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import pandas as pd
 import requests
 from baseclasses.dataclasses.alert import AlertEnum
 from baseclasses.dataclasses.number_shortener import NoShortening, NumberShortenerABC
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.template.base import mark_safe
 from django.template.loader import render_to_string
@@ -25,6 +26,8 @@ from reporting.core.reporting_colors import Color, ReportingColors
 from reporting.core.text_converter import HtmlLatexConverter
 from reporting.dataclasses.display_field import DisplayField
 from rest_framework import serializers
+
+from montrek.utils import SystemFormatting
 
 type StyleAttrsType = dict[str, str]
 type TdClassesType = list[str]
@@ -101,19 +104,20 @@ class TableElement:
         return " ".join(td_classes)
 
     def get_display_field(self, obj: Any) -> DisplayField:
-        value = self.get_attribute(obj, "html")
+        obj_value = self.get_attribute(obj, "html")
         table_element = (
-            self.get_none_table_element() if self.empty_value(value) else self
+            self.get_none_table_element() if self.empty_value(obj_value) else self
         )
-        style_attrs_str = table_element.get_style_attrs_str(value, obj)
-        td_classes_str = table_element.get_td_classes_str(value, obj)
-        value = table_element.render_field_template(value, obj)
+        style_attrs_str = table_element.get_style_attrs_str(obj_value, obj)
+        td_classes_str = table_element.get_td_classes_str(obj_value, obj)
+        value = table_element.render_field_template(obj_value, obj)
         return DisplayField(
             name=self.name,
             display_value=table_element.format(value),
             style_attrs_str=style_attrs_str,
             td_classes_str=td_classes_str,
             hover_text=self.get_hover_text(obj),
+            value=obj_value,
         )
 
     def get_none_table_element(self):
@@ -150,6 +154,10 @@ class TableElement:
 
     def get_field_context_data(self, _value: Any, _obj: Any) -> dict[str, Any]:
         return {}
+
+    @property
+    def excel_format_str(self) -> str | None:
+        return None
 
 
 @dataclass
@@ -202,7 +210,7 @@ class ExternalLinkTableElement(AttrTableElement):
     def get_value(self, obj: Any) -> Any:
         url = super().get_value(obj)
         # Ensure url is string-like before attempting to parse; otherwise, return as-is.
-        if not isinstance(url, (str, bytes)):
+        if not isinstance(url, str | bytes):
             return url
         if not url:
             return url
@@ -305,11 +313,19 @@ class BaseLinkTableElement(TableElement, GetDottetAttrsOrArgMixin):
             )
         except NoReverseMatch:
             return ""
+        filter_params = self.get_filter(obj)
+        query = urlencode(filter_params, doseq=True, quote_via=quote)
+        return f"{url}?{query}" if query else url
+
+    def get_filter(self, obj: Any) -> dict[str, Any]:
         filter_field = self.kwargs.get("filter")
         if filter_field:
-            filter_str = f"?filter_field={filter_field}&filter_lookup=in&filter_value={self.get_dotted_attr_or_arg(obj, filter_field)}"
-            url += filter_str
-        return url
+            return {
+                "filter_field": filter_field,
+                "filter_lookup": "in",
+                "filter_value": self.get_dotted_attr_or_arg(obj, filter_field),
+            }
+        return {}
 
     def get_link(self, obj: Any) -> str | None:
         url = self.get_url(obj)
@@ -478,22 +494,33 @@ class NumberTableElement(AttrTableElement):
     shortener: NumberShortenerABC = NoShortening()
     numerical_type: type = float
     serializer_field_class: ClassVar = serializers.FloatField
+    _excel_decimal_places: ClassVar[int] = 2
+
+    @property
+    def excel_format_str(self) -> str:
+        dec = self._excel_decimal_places
+        if not dec:
+            return "#,##0"
+        return "#,##0." + dec * "0"
 
     def get_display_field(self, obj: Any) -> DisplayField:
         value = self.get_attribute(obj, "html")
         table_element = (
             self.get_none_table_element() if self.empty_value(value) else self
         )
-        display_value, style_attrs = self._analyze_value(value)
+        display_value = self._analyze_value(value)
         display_value = table_element.render_field_template(display_value, obj)
         return DisplayField(
             name=self.name,
             display_value=display_value,
-            style_attrs_str=table_element.format_style_attr(style_attrs),
+            style_attrs_str=table_element.format_style_attr(
+                self.get_style_attrs(value, obj)
+            ),
             td_classes_str=table_element.format_td_classes(
                 self.get_td_classes(value, obj)
             ),
             hover_text=self.get_hover_text(obj),
+            value=value,
         )
 
     def get_td_classes(self, _value: Any, _obj: Any) -> TdClassesType:
@@ -504,17 +531,25 @@ class NumberTableElement(AttrTableElement):
             return ["text-start"]
         return ["text-end"]
 
-    def _analyze_value(self, value: Any) -> tuple[str, StyleAttrsType]:
-        # returns (display_value, style_attrs)
+    def _analyze_value(self, value: Any) -> str:
+        # returns a display string for the given value
         if pd.isna(value):
-            return "-", {}
+            return "-"
 
         if not isinstance(value, int | float | Decimal):
-            return str(value), {}
+            return str(value)
 
         formatted = self._format_value(value)
-        color = _get_value_color(value).hex
-        return formatted, {"color": color}
+        return formatted
+
+    def get_style_attrs(self, _value: Any, _obj: Any) -> StyleAttrsType:
+        if pd.isna(_value):
+            return {}
+
+        if not isinstance(_value, int | float | Decimal):
+            return {}
+        color = _get_value_color(_value).hex
+        return {"color": color}
 
     def format_latex(self, value):
         if not isinstance(value, int | float | Decimal):
@@ -524,7 +559,7 @@ class NumberTableElement(AttrTableElement):
         return f"{color} {formatted_value} &"
 
     def _format_value(self, value) -> str:
-        return self.shortener.shorten(value, "")
+        return self.shortener.shorten(value, 2)
 
     def get_value(self, obj: Any) -> Any:
         value = super().get_value(obj)
@@ -540,9 +575,10 @@ class FloatTableElement(NumberTableElement):
     serializer_field_class = serializers.FloatField
     attr: str
     shortener: NumberShortenerABC = NoShortening()
+    _excel_decimal_places: ClassVar[int] = 3
 
     def _format_value(self, value) -> str:
-        return self.shortener.shorten(value, ",.3f")
+        return self.shortener.shorten(value, 3)
 
     def get_value_len(self, obj: Any) -> int:
         return super().get_value_len(obj) + 4
@@ -554,10 +590,11 @@ class IntTableElement(NumberTableElement):
     attr: str
     numerical_type: type = int
     shortener: NumberShortenerABC = NoShortening()
+    _excel_decimal_places: ClassVar[int] = 0
 
     def _format_value(self, value) -> str:
         value = round(value)
-        return self.shortener.shorten(value, ",.0f")
+        return self.shortener.shorten(value, 0)
 
 
 @dataclass
@@ -565,8 +602,12 @@ class PercentTableElement(NumberTableElement):
     serializer_field_class = serializers.FloatField
     attr: str
 
+    @property
+    def excel_format_str(self) -> str:
+        return "0.00%"
+
     def _format_value(self, value) -> str:
-        return f"{value:,.2%}"
+        return self.shortener.shorten(value * 100, 2) + "%"
 
     def format_latex(self, value) -> str:
         value = super().format_latex(value)
@@ -597,8 +638,16 @@ class ProgressBarTableElement(NumberTableElement):
 @dataclass
 class DateTableBaseElement(AttrTableElement):
     attr: str
-    date_format = "%Y-%m-%d"
     td_classes: ClassVar[TdClassesType] = ["text-start"]
+
+    @property
+    def date_format(self) -> str:
+        if (
+            getattr(settings, "NUMBER_FORMATTING", SystemFormatting.EN)
+            == SystemFormatting.DE
+        ):
+            return "%d.%m.%Y"
+        return "%Y-%m-%d"
 
     def format(self, value):
         return self.format_date(value)
@@ -630,17 +679,25 @@ class DateTableElement(DateTableBaseElement):
 
 class DateTimeTableElement(DateTableBaseElement):
     serializer_field_class = serializers.DateTimeField
-    date_format = "%Y-%m-%d %H:%M:%S"
+
+    @property
+    def date_format(self) -> str:
+        return super().date_format + " %H:%M:%S"
 
 
 class DateGermanTableElement(DateTableBaseElement):
-    date_format = "%d.%m.%Y"
+    @property
+    def date_format(self) -> str:
+        return "%d.%m.%Y"
 
 
 @dataclass
 class DateYearTableElement(DateTableBaseElement):
     serializer_field_class = serializers.DateField
-    date_format = "%Y"
+
+    @property
+    def date_format(self) -> str:
+        return "%Y"
 
 
 @dataclass
@@ -669,7 +726,7 @@ class MoneyTableElement(NumberTableElement):
         return {"ccy_symbol": self.ccy_symbol}
 
     def _format_value(self, value) -> str:
-        return self.shortener.shorten(value, ",.2f")
+        return self.shortener.shorten(value, 2)
 
     def format_latex(self, value):
         formatted_value = super().format_latex(value)

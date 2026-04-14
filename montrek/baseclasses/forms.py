@@ -1,11 +1,38 @@
 from typing import Any
 
-from baseclasses.models import LinkTypeEnum
 from django import forms
+from django.conf import settings
 from django.contrib.admin.widgets import FilteredSelectMultiple
-from django.db.models import DateField, QuerySet, TextChoices
+from django.db.models import DateField, DecimalField, FloatField, QuerySet, TextChoices
 from django.forms.widgets import ChoiceWidget
 from encrypted_fields import EncryptedCharField
+
+from baseclasses.models import LinkTypeEnum
+from montrek.utils import SystemFormatting
+
+
+class GermanDecimalFormField(forms.DecimalField):
+    """DecimalField that accepts German decimal notation (comma as decimal separator),
+    independent of the request's active locale."""
+
+    widget = forms.TextInput
+
+    def to_python(self, value):
+        if isinstance(value, str) and "," in value:
+            value = value.replace(".", "").replace(",", ".")
+        return super().to_python(value)
+
+
+class GermanFloatFormField(forms.FloatField):
+    """FloatField that accepts German decimal notation (comma as decimal separator),
+    independent of the request's active locale."""
+
+    widget = forms.TextInput
+
+    def to_python(self, value):
+        if isinstance(value, str) and "," in value:
+            value = value.replace(".", "").replace(",", ".")
+        return super().to_python(value)
 
 
 class DateRangeForm(forms.Form):
@@ -206,7 +233,22 @@ class MontrekCreateForm(forms.ModelForm):
             return form_field
 
         if isinstance(field, DateField):
-            return field.formfield(widget=forms.DateInput(attrs={"type": "date"}))
+            return field.formfield(
+                widget=forms.DateInput(attrs={"type": "date"}, format="%Y-%m-%d")
+            )
+
+        if isinstance(field, FloatField | DecimalField):
+            is_de = (
+                getattr(settings, "NUMBER_FORMATTING", SystemFormatting.EN)
+                == SystemFormatting.DE
+            )
+            if is_de:
+                form_class = (
+                    GermanDecimalFormField
+                    if isinstance(field, DecimalField)
+                    else GermanFloatFormField
+                )
+                return field.formfield(form_class=form_class)
 
         return field.formfield()
 
