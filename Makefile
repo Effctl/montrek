@@ -90,8 +90,51 @@ local-dev: # Use pyenv montrek-3.12.0 and start full local dev
 	@tmux attach-session -t "$(TMUX_LOCAL_DEV_SESSION)"
 
 .PHONY: sync-local-python-env
-sync-local-python-env: # Sync the local (non-docker) python environment with the requirements specified in the montrek repositories.
+sync-local-python-env: # Regenerate requirements.txt from all requirements.in files.
 	@$(SECURE_WRAPPER) bin/local/sync-python-env.sh
+
+.PHONY: sync-local-venv
+sync-local-venv: # Ensure .venv exists and sync it from requirements.txt.
+	@if [ -d ".venv" ] && [ ! -x ".venv/bin/python" ]; then \
+		echo "Detected broken .venv (missing .venv/bin/python). Recreating..."; \
+		rm -rf .venv; \
+	fi
+	@if [ ! -x ".venv/bin/python" ]; then \
+		echo "Creating .venv with $(UV_PYTHON)..."; \
+		uv venv .venv --python "$(UV_PYTHON)"; \
+	fi
+	@uv pip sync requirements.txt --python .venv/bin/python
+	@.venv/bin/python -V
+	@.venv/bin/python -c "import IPython, ipykernel; print('IPython', IPython.__version__); print('ipykernel', ipykernel.__version__)"
+
+.PHONY: sync-local-python-env-and-venv
+sync-local-python-env-and-venv: sync-local-python-env sync-local-venv # Regenerate requirements.txt and then sync .venv from it in one run.
+
+.PHONY: install-notebook-kernel
+install-notebook-kernel: sync-local-venv # Register a Jupyter kernel from project .venv with correct PYTHONPATH and auto Django setup.
+	@echo "▶ Ensuring ipykernel is installed in .venv..."
+	@bash -lc '. .venv/bin/activate && python -m pip install --upgrade ipykernel'
+	@echo "▶ Installing Jupyter kernel 'montrek-3.12.0' from .venv..."
+	@bash -lc '. .venv/bin/activate && python -m ipykernel install --user --name montrek-3.12.0 --display-name "Python (montrek .venv)"'
+	@echo "▶ Configuring kernel.json (PYTHONPATH + DJANGO_SETTINGS_MODULE)..."
+	@bash -lc '. .venv/bin/activate && python -c "\
+import json, pathlib; \
+kf = pathlib.Path.home() / '.local/share/jupyter/kernels/montrek-3.12.0/kernel.json'; \
+k = json.loads(kf.read_text()); \
+k.setdefault('env', {}).update({'PYTHONPATH': '$(CURDIR)/montrek', 'DJANGO_SETTINGS_MODULE': 'montrek.settings'}); \
+kf.write_text(json.dumps(k, indent=2)); \
+print(f'  kernel.json -> {kf}'); \
+print(f'  PYTHONPATH  -> ' + k['env']['PYTHONPATH']); \
+"'
+	@echo "▶ Installing IPython startup script for automatic django.setup()..."
+	@mkdir -p "$(HOME)/.ipython/profile_default/startup"
+	@if [ -f "$(CURDIR)/bin/local/00-django-setup.py" ]; then \
+		cp "$(CURDIR)/bin/local/00-django-setup.py" "$(HOME)/.ipython/profile_default/startup/00-django-setup.py"; \
+		echo "  startup script → $(HOME)/.ipython/profile_default/startup/00-django-setup.py"; \
+	else \
+		echo "  startup script source not found at $(CURDIR)/bin/local/00-django-setup.py (skipping copy)"; \
+	fi
+	@echo "Done. In PyCharm: stop the Jupyter server, then re-open the notebook and select 'Python (montrek .venv)'."
 
 .PHONY: local-sonarqube-scan
 local-sonarqube-scan: # Run a SonarQube scan and open in SonarQube (Add NO_TESTS=true to skip tests)
