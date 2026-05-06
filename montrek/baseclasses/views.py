@@ -153,6 +153,10 @@ class MontrekViewMixin:
                 messages.error(self.request, message.message)
             elif message.message_type == "info":
                 messages.info(self.request, message.message)
+            elif message.message_type == "warning":
+                messages.warning(self.request, message.message)
+            else:
+                messages.success(self.request, message.message)
 
     def get_view_queryset(self):
         return self.manager.repository.receive()
@@ -640,8 +644,9 @@ class MontrekDeleteView(
     template_name = "montrek_delete.html"
 
     def post(self, request, *args, **kwargs):
+        self.deleted_object = None
         if "action" in request.POST and request.POST["action"] == "Delete":
-            self.manager.delete_object(pk=self.kwargs["pk"])
+            self.deleted_object = self.manager.delete_object(pk=self.kwargs["pk"])
         return HttpResponseRedirect(self.get_success_url())
 
 

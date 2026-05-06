@@ -76,7 +76,11 @@ class MontrekViewTestCase(TestCase):
         self.store_in_view_model()
         self._login_user()
         self.response = self.get_response()
-        self.view = self.response.context.get("view")
+        context = self.response.context
+        if context is not None:
+            self.view = context.get("view")
+        else:
+            self.view = None
 
     def _check_view_class(self):
         if self.view_class == NotImplementedView:
@@ -350,7 +354,9 @@ class MontrekDownloadViewTestCase(MontrekViewTestCase):
         return self.__class__.__name__ == "MontrekDownloadViewTestCase"
 
     def get_response(self):
-        response = self.client.get(self.url, follow=True)
+        response = self.client.get(
+            self.url, follow=True, query_params=self.query_params()
+        )
         response.context = {"view": None}
         return response
 
@@ -492,7 +498,8 @@ class MontrekReportViewTestCase(MontrekViewTestCase, RestApiTestCaseMixin):
             return
         user = MontrekUserFactory()
         self.client.force_login(user)
-        response = self.client.get(self.url + "?send_mail=true")
+        query_params = self.query_params() | {"send_mail": "true"}
+        response = self.client.get(self.url, query_params=query_params)
         self.assertRedirects(response, self.mail_success_url)
 
     def test_report_content(self):

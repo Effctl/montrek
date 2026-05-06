@@ -12,6 +12,7 @@ from reporting.core.reporting_text import (
     MontrekLogo,
     NewPage,
     ReportingBold,
+    ReportingBoldParagraph,
     ReportingCode,
     ReportingEditableText,
     ReportingElement,
@@ -21,12 +22,14 @@ from reporting.core.reporting_text import (
     ReportingHeader2,
     ReportingImage,
     ReportingItalic,
+    ReportingItalicParagraph,
     ReportingKeyboard,
     ReportingMap,
     ReportingParagraph,
     ReportingStrikethrough,
     ReportingText,
     ReportingUnderline,
+    ReportingUnderlineParagraph,
     Vspace,
 )
 
@@ -172,6 +175,16 @@ class TestReportingBold(ReportingElementTestCase):
         return {"text": "Dummy Text"}
 
 
+class TestReportingBoldParagraph(ReportingElementTestCase):
+    reporting_element_class = ReportingBoldParagraph
+    expected_html = "<p><strong>Dummy Text</strong></p>"
+    expected_latex = "\\begin{justify}\\textbf{Dummy Text}\\end{justify}"
+    expected_json = {"reportingboldparagraph": "Dummy Text"}
+
+    def get_call_parameters(self) -> dict:
+        return {"text": "Dummy Text"}
+
+
 class TestReportingItalic(ReportingElementTestCase):
     reporting_element_class = ReportingItalic
     expected_html = "<em>Dummy Text</em>"
@@ -182,11 +195,31 @@ class TestReportingItalic(ReportingElementTestCase):
         return {"text": "Dummy Text"}
 
 
+class TestReportingItalicParagraph(ReportingElementTestCase):
+    reporting_element_class = ReportingItalicParagraph
+    expected_html = "<p><em>Dummy Text</em></p>"
+    expected_latex = "\\begin{justify}\\emph{Dummy Text}\\end{justify}"
+    expected_json = {"reportingitalicparagraph": "Dummy Text"}
+
+    def get_call_parameters(self) -> dict:
+        return {"text": "Dummy Text"}
+
+
 class TestReportingUnderline(ReportingElementTestCase):
     reporting_element_class = ReportingUnderline
     expected_html = "<u>Dummy Text</u>"
     expected_latex = "\\underline{Dummy Text}"
     expected_json = {"reportingunderline": "Dummy Text"}
+
+    def get_call_parameters(self) -> dict:
+        return {"text": "Dummy Text"}
+
+
+class TestReportingUnderlineParagraph(ReportingElementTestCase):
+    reporting_element_class = ReportingUnderlineParagraph
+    expected_html = "<p><u>Dummy Text</u></p>"
+    expected_latex = "\\begin{justify}\\underline{Dummy Text}\\end{justify}"
+    expected_json = {"reportingunderlineparagraph": "Dummy Text"}
 
     def get_call_parameters(self) -> dict:
         return {"text": "Dummy Text"}
@@ -513,7 +546,8 @@ class TestReportingParagraph(TestCase):
         self.assertEqual(paragraph.markdown_text, "This is a **bold** text")
         test_bold_to_html = paragraph.to_html()
         self.assertEqual(
-            test_bold_to_html, "<p>This is a <strong>bold</strong> text</p>\n\n"
+            test_bold_to_html,
+            '<p class="mt-2">This is a <strong>bold</strong> text</p>\n\n',
         )
         test_bold_to_latex = paragraph.to_latex()
         self.assertEqual(
@@ -526,7 +560,8 @@ class TestReportingParagraph(TestCase):
         self.assertEqual(paragraph.markdown_text, "This is a *italic* text")
         test_italic_to_html = paragraph.to_html()
         self.assertEqual(
-            test_italic_to_html, "<p>This is a <em>italic</em> text</p>\n\n"
+            test_italic_to_html,
+            '<p class="mt-2">This is a <em>italic</em> text</p>\n\n',
         )
         test_italic_to_latex = paragraph.to_latex()
         self.assertEqual(
@@ -561,11 +596,7 @@ class TestMontrekLogo(TestCase):
 
 class TestMarkdownReportingElement(ReportingElementTestCase):
     reporting_element_class = MarkdownReportingElement
-    expected_html = (
-        "<p>This is a <strong>bold</strong> text with a table:</p>\n"
-        "<table>\n<thead>\n<tr>\n<th>Header1</th>\n<th>Header2</th>\n</tr>\n</thead>\n"
-        "<tbody>\n<tr>\n<td>Cell1</td>\n<td>Cell2</td>\n</tr>\n</tbody>\n</table>"
-    )
+    expected_html = '<pclass="mt-2">Thisisa<strong>bold</strong>textwithatable:</p><tableclass="tabletable-custom-striped"><thead><tr><th>Header1</th><th>Header2</th></tr></thead><tbody><tr><td>Cell1</td><td>Cell2</td></tr></tbody></table>'
     expected_latex = "\\begin{contentbox}This is a \\textbf{bold} text with a table:\n\n\\begin{longtable}[]{@{}ll@{}}\n\\toprule\\noalign{}\nHeader1 & Header2 \\\\\n\\midrule\\noalign{}\n\\endhead\n\\bottomrule\\noalign{}\n\\endlastfoot\nCell1 & Cell2 \\\\\n\\end{longtable}\n\\end{contentbox}"
     expected_json = {
         "markdown_reporting_element": "This is a **bold** text with a table:\n\n| Header1 | Header2 |\n|---------|---------|\n| Cell1   | Cell2   |"
@@ -579,7 +610,9 @@ class TestMarkdownReportingElement(ReportingElementTestCase):
         text = "<script>HACKERATTACK</script>"
         rep_element = self.reporting_element_class(text)
         test_html = rep_element.to_html()
-        self.assertEqual(test_html, "HACKERATTACK\n\n\n")
+        self.assertEqual(
+            test_html, "<p>&lt;script&gt;HACKERATTACK&lt;/script&gt;</p>\n\n"
+        )
 
 
 class TestReportingError(ReportingElementTestCase):

@@ -1,11 +1,38 @@
 from typing import Any
 
-from baseclasses.models import LinkTypeEnum
 from django import forms
+from django.conf import settings
 from django.contrib.admin.widgets import FilteredSelectMultiple
-from django.db.models import DateField, QuerySet, TextChoices
+from django.db.models import DateField, DecimalField, FloatField, QuerySet, TextChoices
 from django.forms.widgets import ChoiceWidget
 from encrypted_fields import EncryptedCharField
+
+from baseclasses.models import LinkTypeEnum
+from montrek.utils import SystemFormatting
+
+
+class GermanDecimalFormField(forms.DecimalField):
+    """DecimalField that accepts German decimal notation (comma as decimal separator),
+    independent of the request's active locale."""
+
+    widget = forms.TextInput
+
+    def to_python(self, value):
+        if isinstance(value, str) and "," in value:
+            value = value.replace(".", "").replace(",", ".")
+        return super().to_python(value)
+
+
+class GermanFloatFormField(forms.FloatField):
+    """FloatField that accepts German decimal notation (comma as decimal separator),
+    independent of the request's active locale."""
+
+    widget = forms.TextInput
+
+    def to_python(self, value):
+        if isinstance(value, str) and "," in value:
+            value = value.replace(".", "").replace(",", ".")
+        return super().to_python(value)
 
 
 class DateRangeForm(forms.Form):
@@ -206,7 +233,22 @@ class MontrekCreateForm(forms.ModelForm):
             return form_field
 
         if isinstance(field, DateField):
-            return field.formfield(widget=forms.DateInput(attrs={"type": "date"}))
+            return field.formfield(
+                widget=forms.DateInput(attrs={"type": "date"}, format="%Y-%m-%d")
+            )
+
+        if isinstance(field, FloatField | DecimalField):
+            is_de = (
+                getattr(settings, "NUMBER_FORMATTING", SystemFormatting.EN)
+                == SystemFormatting.DE
+            )
+            if is_de:
+                form_class = (
+                    GermanDecimalFormField
+                    if isinstance(field, DecimalField)
+                    else GermanFloatFormField
+                )
+                return field.formfield(form_class=form_class)
 
         return field.formfield()
 
@@ -230,7 +272,8 @@ class MontrekCreateForm(forms.ModelForm):
     def _apply_bootstrap_classes(self):
         for name, field in self.fields.items():
             widget = field.widget
-
+            if isinstance(widget, forms.CheckboxSelectMultiple):
+                pass  # form-select must not be applied; styled via form-check-input in template
             # Checkbox
             if isinstance(widget, forms.CheckboxInput):
                 widget.attrs["class"] = "form-check-input"
@@ -284,6 +327,7 @@ class MontrekCreateForm(forms.ModelForm):
         link_name: str,
         queryset: QuerySet,
         display_field: str,
+        source_field: str | None = None,
         required: bool = False,
         is_char_field: bool = False,
         use_checkboxes_for_many_to_many: bool = True,
@@ -303,7 +347,7 @@ class MontrekCreateForm(forms.ModelForm):
             choice_class = MontrekModelChoiceField
 
         initial_link = choice_class.get_initial_link(
-            self.initial, queryset, display_field, separator
+            self.initial, queryset, display_field, separator, source_field
         )
         if readonly:
             kwargs["widget"] = forms.TextInput(attrs={"readonly": "readonly"})
@@ -327,7 +371,9 @@ class BaseMontrekChoiceField:
         super().__init__(*args, **kwargs)
         self.display_field = display_field
         # Ensure Bootstrap styling
-        if hasattr(self, "widget"):
+        if hasattr(self, "widget") and not isinstance(
+            self.widget, forms.CheckboxSelectMultiple
+        ):
             css_class = self.widget.attrs.get("class", "")
             self.widget.attrs["class"] = f"{css_class} form-select".strip()
 
@@ -336,7 +382,11 @@ class BaseMontrekChoiceField:
 
     @staticmethod
     def get_initial_link(
-        initial: dict[str, Any], queryset: QuerySet, display_field: str, separator: str
+        initial: dict[str, Any],
+        queryset: QuerySet,
+        display_field: str,
+        separator: str,
+        source_field: str | None,
     ) -> object | None:
         raise NotImplementedError("Subclasses must implement this method.")
 
@@ -344,10 +394,15 @@ class BaseMontrekChoiceField:
 class MontrekModelChoiceField(BaseMontrekChoiceField, forms.ModelChoiceField):
     @staticmethod
     def get_initial_link(
-        initial: dict[str, Any], queryset: QuerySet, display_field: str, separator: str
+        initial: dict[str, Any],
+        queryset: QuerySet,
+        display_field: str,
+        separator: str,
+        source_field: str | None,
     ) -> object | None:
+        source_field = display_field if source_field is None else source_field
         initial_link = queryset.filter(
-            **{display_field: initial.get(display_field)}
+            **{display_field: initial.get(source_field)}
         ).first()
         return initial_link
 
@@ -370,14 +425,20 @@ class MontrekModelMultipleChoiceField(
     @staticmethod
     def get_widget(display_field, use_checkboxes: bool) -> ChoiceWidget:
         if use_checkboxes:
-            return forms.CheckboxSelectMultiple()
+            widget = forms.CheckboxSelectMultiple()
+            return widget
         return FilteredSelectMultiple(verbose_name=display_field, is_stacked=False)
 
     @staticmethod
     def get_initial_link(
-        initial: dict[str, Any], queryset: QuerySet, display_field: str, separator: str
+        initial: dict[str, Any],
+        queryset: QuerySet,
+        display_field: str,
+        separator: str,
+        source_field: str | None,
     ) -> object | None | QuerySet:
-        initial_links_str = initial.get(display_field)
+        source_field = display_field if source_field is None else source_field
+        initial_links_str = initial.get(source_field)
         if not isinstance(initial_links_str, str):
             return None
         filter_kwargs = {f"{display_field}__in": initial_links_str.split(separator)}
@@ -391,9 +452,14 @@ class MontrekModelCharChoiceField(BaseMontrekChoiceField, forms.CharField):
 
     @staticmethod
     def get_initial_link(
-        initial: dict[str, Any], queryset: QuerySet, display_field: str, separator: str
+        initial: dict[str, Any],
+        queryset: QuerySet,
+        display_field: str,
+        separator: str,
+        source_field: str | None,
     ) -> object | None:
-        return initial.get(display_field)
+        source_field = display_field if source_field is None else source_field
+        return initial.get(source_field)
 
     def clean(self, value):
         if not value:

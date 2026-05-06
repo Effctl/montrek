@@ -11,6 +11,10 @@ help: # Show help for each of the Makefile recipes.
 local-init: # Install local python environment and necessary packages
 	@$(SECURE_WRAPPER) bin/local/init.sh
 
+.PHONY: local-init-win
+local-init-win: # Install local python environment and necessary packages on windows
+	@powershell -ExecutionPolicy Bypass -File bin/local/init.ps1
+
 .PHONY: local-runserver
 local-runserver: # Run the montrek django app locally (non-docker).
 	@$(SECURE_WRAPPER) bin/local/runserver.sh

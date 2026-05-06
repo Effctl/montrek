@@ -8,6 +8,8 @@ from django.test.runner import DiscoverRunner
 from django.test.utils import override_settings
 from django.urls import reverse_lazy
 
+from montrek.utils import SystemFormatting
+
 real_socket = socket.socket
 
 
@@ -50,6 +52,8 @@ class MontrekTestRunner(DiscoverRunner):
                 for m in settings.MIDDLEWARE
                 if m != "querycount.middleware.QueryCountMiddleware"
             ],
+            "NUMBER_FORMATTING": SystemFormatting.EN,
+            "LANGUAGE_CODE": "en-us",
         }
         self._override = override_settings(**test_settings)
         self._override.enable()

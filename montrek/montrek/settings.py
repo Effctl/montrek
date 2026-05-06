@@ -19,7 +19,7 @@ from django.urls import reverse_lazy
 from reporting.core.reporting_colors import ReportingColors
 
 from montrek.filtered_warnings import add_filtered_warnings
-from montrek.utils import get_keycloak_base_url, get_oidc_endpoints
+from montrek.utils import SystemFormatting, get_keycloak_base_url, get_oidc_endpoints
 
 add_filtered_warnings()
 
@@ -58,17 +58,18 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 DJANGO_APPS = [
     "django.contrib.admin",
     "django_celery_beat",
-    "debug_toolbar",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "querycount",
     "django_extensions",
     "rest_framework",
     "rest_framework_simplejwt.token_blacklist",
 ]
+
+if DEBUG:
+    DJANGO_APPS += ["debug_toolbar", "querycount"]
 
 
 def get_montrek_extension_apps(base_dir, app_path=""):
@@ -132,16 +133,30 @@ NAVBAR_HOME_URL = config("NAVBAR_HOME_URL", default=HOME_URL)
 NAVBAR_HOME_LABEL = config("NAVBAR_HOME_LABEL", default="Home").replace("*", " ")
 
 DJANGO_MIDDLEWARE = [
-    "debug_toolbar.middleware.DebugToolbarMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "querycount.middleware.QueryCountMiddleware",
 ]
+
+if DEBUG:
+    DJANGO_MIDDLEWARE = [
+        "debug_toolbar.middleware.DebugToolbarMiddleware",
+        *DJANGO_MIDDLEWARE,
+        "querycount.middleware.QueryCountMiddleware",
+    ]
+
+    DEBUG_TOOLBAR_CONFIG = {
+        "DISABLE_PANELS": {
+            "debug_toolbar.panels.templates.TemplatesPanel",
+            "debug_toolbar.panels.history.HistoryPanel",
+            "debug_toolbar.panels.redirects.RedirectsPanel",
+        },
+    }
 
 MONTREK_MIDDLEWARE = [
     "middleware.LoginRequiredMiddleware",
@@ -270,16 +285,18 @@ else:
 LOGIN_REDIRECT_URL = reverse_lazy("home")
 
 
+# Number formatting
+NUMBER_FORMATTING = SystemFormatting(config("NUMBER_FORMATTING", default="en"))
+
 # Internationalization
 # https://docs.djangoproject.com/en/4.2/topics/i18n/
-
-LANGUAGE_CODE = "en-us"
 
 TIME_ZONE = "UTC"
 
 USE_I18N = True
 
 USE_TZ = True
+LANGUAGE_CODE = config("LANGUAGE_CODE", default="en-us")
 
 
 # Static files (CSS, JavaScript, Images)
