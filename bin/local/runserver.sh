@@ -7,16 +7,23 @@ else
 	exit 1
 fi
 
+# Prefer a dedicated local dev port to avoid clashing with docker web.
+RUNSERVER_PORT="${LOCAL_APP_PORT:-${APP_PORT:-}}"
+
 # Check if required variables are set
-if [[ -z "$APP_PORT" ]]; then
+if [[ -z "$RUNSERVER_PORT" ]]; then
 	echo "One or more required environment variables are missing in .env:"
-	echo "APP_PORT"
+	echo "Set LOCAL_APP_PORT for local Django, or APP_PORT as a fallback."
 	exit 1
 fi
 
 echo "Environment variables loaded successfully."
-echo "App Port: $APP_PORT"
+if [[ -n "${LOCAL_APP_PORT:-}" ]]; then
+	echo "Using LOCAL_APP_PORT for local Django: $RUNSERVER_PORT"
+else
+	echo "Using APP_PORT for local Django: $RUNSERVER_PORT"
+fi
 
-cd montrek/
+cd montrek/ || exit 1
 python manage.py migrate
-python manage.py runserver $APP_PORT
+python manage.py runserver "$RUNSERVER_PORT"

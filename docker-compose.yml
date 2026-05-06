@@ -29,6 +29,7 @@ services:
     environment:
       - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
       - SERVICE=web
+      - DB_HOST=db
       - PIUD=${USER_ID}
       - PGUD=${GROUP_ID}
     volumes:
