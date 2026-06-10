@@ -1,9 +1,12 @@
+import inspect
 from dataclasses import dataclass
+from typing import Any
 from django.apps.registry import AppRegistryNotReady
 from django.db import models
-from django.db.models import ExpressionWrapper, Field, Subquery
+from django.db.models import ExpressionWrapper, Field, QuerySet, Subquery
 from django.utils import timezone
 from baseclasses.repositories.subquery_builder import (
+    LinkedSatelliteSubqueryBuilderBase,
     ReverseLinkedSatelliteSubqueryBuilder,
     SubqueryBuilder,
     TSSumFieldSubqueryBuilder,
@@ -35,6 +38,19 @@ class FieldProjection:
     satellite_alias: SatelliteAlias
 
 
+@dataclass
+class LinkedSatelliteAlias:
+    alias_name: str
+    subquery_builder: LinkedSatelliteSubqueryBuilderBase
+
+
+@dataclass
+class LinkedFieldProjection:
+    field: str
+    outfield: str
+    linked_satellite_alias: LinkedSatelliteAlias
+
+
 class Annotator:
     def __init__(self, hub_class: type[MontrekHubABC]):
         self.hub_class = hub_class
@@ -50,6 +66,12 @@ class Annotator:
             []
         )
         self.annotated_link_classes: list[type[MontrekLinkABC]] = []
+        self.linked_satellite_aliases: list[LinkedSatelliteAlias] = []
+        self.linked_field_projections: list[LinkedFieldProjection] = []
+        # Tracks all field names (outfields) in registration order so that
+        # get_annotated_field_names preserves insertion order across annotations,
+        # field_projections, and linked_field_projections.
+        self._field_names_in_order: list[str] = list(self.raw_annotations.keys())
 
     def get_raw_annotations(self) -> dict[str, SubqueryBuilder]:
         return {
@@ -87,12 +109,17 @@ class Annotator:
             return
 
         ts_agg_func = kwargs.get("ts_agg_func")
+        hub_satellite_filter = kwargs.get("hub_satellite_filter")
         if satellite_class.is_timeseries and ts_agg_func == "sum":
             self._handle_ts_sum_satellite(fields, satellite_class, rename_field_map)
             return
 
         self._handle_scalar_satellite(
-            fields, satellite_class, subquery_builder, rename_field_map
+            fields,
+            satellite_class,
+            subquery_builder,
+            rename_field_map,
+            hub_satellite_filter,
         )
 
     def field_projections_to_subqueries(
@@ -107,9 +134,27 @@ class Annotator:
             subquery_map[outfield] = subquery_builder.build_subquery(alias_name, field)
         return subquery_map
 
-    def build(self, reference_date: timezone.datetime) -> dict[str, Subquery]:
+    def linked_field_projections_to_subqueries(
+        self,
+    ) -> dict[str, Subquery]:
+        subquery_map = {}
+        for lfp in self.linked_field_projections:
+            alias_name = lfp.linked_satellite_alias.alias_name
+            builder = lfp.linked_satellite_alias.subquery_builder
+            subquery_map[lfp.outfield] = builder.build_subquery(alias_name, lfp.field)
+        return subquery_map
+
+    def build(
+        self,
+        reference_date: timezone.datetime,
+        queryset: QuerySet | None = None,
+    ) -> dict[str, Subquery]:
         return {
-            field: subquery_builder.build(reference_date)
+            field: (
+                subquery_builder.build(reference_date, queryset=queryset)
+                if "queryset" in inspect.signature(subquery_builder.build).parameters
+                else subquery_builder.build(reference_date)
+            )
             for field, subquery_builder in self.annotations.items()
         }
 
@@ -132,9 +177,7 @@ class Annotator:
         return [field.name for field in self.satellite_fields()]
 
     def get_annotated_field_names(self) -> list[str]:
-        return list(self.annotations.keys()) + [
-            fp.outfield for fp in self.field_projections
-        ]
+        return list(self._field_names_in_order)
 
     def get_satellite_classes(self) -> list[type[MontrekSatelliteBaseABC]]:
         return self.annotated_satellite_classes
@@ -174,6 +217,15 @@ class Annotator:
         for field_projection in self.field_projections:
             if field_projection.outfield == old_field:
                 field_projection.outfield = new_field
+        for linked_field_projection in self.linked_field_projections:
+            if linked_field_projection.outfield == old_field:
+                linked_field_projection.outfield = new_field
+        if old_field in self.field_type_map:
+            self.field_type_map[new_field] = self.field_type_map.pop(old_field)
+        for i, name in enumerate(self._field_names_in_order):
+            if name == old_field:
+                self._field_names_in_order[i] = new_field
+                break
 
     def has_only_static_sats(self) -> bool:
         return not (
@@ -194,23 +246,97 @@ class Annotator:
         self.annotated_link_classes.append(link_class)
         self.add_to_annotated_satellite_classes(satellite_class)
 
-        for field in fields:
-            outfield = rename_field_map.get(field, field)
+        # Use a probe instance to determine whether this link is scalar (one
+        # satellite per hub row).  Scalar links — both static and timeseries —
+        # can share a single satellite-pk alias so each additional field costs
+        # only a cheap pk-lookup instead of a full link traversal.  For
+        # timeseries satellites the alias is built via _build_ts_scalar_alias,
+        # which matches the linked hub's HubValueDate at the same value date.
+        probe_builder = subquery_builder(satellite_class, fields[0], **kwargs)
+        is_scalar = not probe_builder._is_multiple_allowed(probe_builder._hub_field_to)
 
-            self.annotations[outfield] = subquery_builder(
-                satellite_class, field, **kwargs
+        if is_scalar:
+            linked_alias = self._get_or_create_linked_satellite_alias(
+                satellite_class, subquery_builder, probe_builder
             )
-            self.set_field_type(field, outfield, satellite_class)
-
-            if issubclass(link_class, MontrekManyToManyLinkABC) or (
-                issubclass(link_class, MontrekOneToManyLinkABC)
-                and isinstance(
-                    self.annotations[outfield],
-                    ReverseLinkedSatelliteSubqueryBuilder,
+            for field in fields:
+                outfield = rename_field_map.get(field, field)
+                self.linked_field_projections.append(
+                    LinkedFieldProjection(
+                        field=field,
+                        outfield=outfield,
+                        linked_satellite_alias=linked_alias,
+                    )
                 )
-                and agg_func == "string_concat"
+                self.set_field_type(field, outfield, satellite_class)
+                self._field_names_in_order.append(outfield)
+        else:
+            for field in fields:
+                outfield = rename_field_map.get(field, field)
+                self.annotations[outfield] = subquery_builder(
+                    satellite_class, field, **kwargs
+                )
+                self.set_field_type(field, outfield, satellite_class)
+                self._field_names_in_order.append(outfield)
+
+                if issubclass(link_class, MontrekManyToManyLinkABC) or (
+                    issubclass(link_class, MontrekOneToManyLinkABC)
+                    and isinstance(
+                        self.annotations[outfield],
+                        ReverseLinkedSatelliteSubqueryBuilder,
+                    )
+                    and agg_func == "string_concat"
+                ):
+                    self.field_type_map[outfield] = models.CharField(
+                        null=True, blank=True
+                    )
+
+    def _get_or_create_linked_satellite_alias(
+        self,
+        satellite_class: type[MontrekSatelliteBaseABC],
+        subquery_builder_class: type[SubqueryBuilder],
+        probe_builder: LinkedSatelliteSubqueryBuilderBase,
+    ) -> LinkedSatelliteAlias:
+        """Return an existing alias if the same (satellite, link, config)
+        combination has already been registered; otherwise create a new one.
+
+        This ensures that multiple fields from the same scalar linked satellite
+        share a single alias subquery rather than each building an independent
+        full link traversal.
+        """
+        for alias in self.linked_satellite_aliases:
+            b = alias.subquery_builder
+            if (
+                type(b) is subquery_builder_class
+                and b.satellite_class is satellite_class
+                and b.link_class is probe_builder.link_class
+                and b.parent_link_classes == probe_builder.parent_link_classes
+                and list(b.parent_link_reversed)
+                == list(probe_builder.parent_link_reversed)
+                and b.link_satellite_filter == probe_builder.link_satellite_filter
+                and b.cross_satellite_filters == probe_builder.cross_satellite_filters
+                and b.value_date_scope_path == probe_builder.value_date_scope_path
+                and b.link_hub_value_date_filter
+                == probe_builder.link_hub_value_date_filter
             ):
-                self.field_type_map[outfield] = models.CharField(null=True, blank=True)
+                return alias
+
+        base_name = (
+            f"{satellite_class.__name__.lower()}"
+            f"__{probe_builder.link_class.__name__.lower()}__lsat"
+        )
+        existing_names = {a.alias_name for a in self.linked_satellite_aliases}
+        alias_name = base_name
+        counter = 0
+        while alias_name in existing_names:
+            counter += 1
+            alias_name = f"{base_name}_{counter}"
+
+        new_alias = LinkedSatelliteAlias(
+            alias_name=alias_name, subquery_builder=probe_builder
+        )
+        self.linked_satellite_aliases.append(new_alias)
+        return new_alias
 
     def _handle_ts_sum_satellite(
         self,
@@ -227,6 +353,7 @@ class Annotator:
                 satellite_class, field
             )
             self.set_field_type(field, outfield, satellite_class)
+            self._field_names_in_order.append(outfield)
 
     def _handle_scalar_satellite(
         self,
@@ -234,15 +361,11 @@ class Annotator:
         satellite_class: type[MontrekSatelliteBaseABC],
         subquery_builder: type[SubqueryBuilder],
         rename_field_map: dict[str, str],
+        hub_satellite_filter: dict[str, Any] | None,
     ):
-        alias_name = f"{satellite_class.__name__.lower()}__sat"
-        subquery_builder_inst = subquery_builder(satellite_class=satellite_class)
-        satellite_alias = SatelliteAlias(
-            alias_name=alias_name,
-            subquery_builder=subquery_builder_inst,
+        satellite_alias = self._get_or_create_satellite_alias(
+            satellite_class, subquery_builder, hub_satellite_filter
         )
-        self.satellite_aliases.append(satellite_alias)
-
         self.add_to_annotated_satellite_classes(satellite_class)
 
         for field in fields:
@@ -253,6 +376,41 @@ class Annotator:
                 )
             )
             self.set_field_type(field, outfield, satellite_class)
+            self._field_names_in_order.append(outfield)
+
+    def _get_or_create_satellite_alias(
+        self,
+        satellite_class: type[MontrekSatelliteBaseABC],
+        subquery_builder: type[SubqueryBuilder],
+        hub_satellite_filter: dict[str, Any] | None,
+    ) -> SatelliteAlias:
+        hub_satellite_filter = hub_satellite_filter or {}
+        for existing in self.satellite_aliases:
+            b = existing.subquery_builder
+            if (
+                type(b) is subquery_builder
+                and b.satellite_class is satellite_class
+                and b.hub_satellite_filter == hub_satellite_filter
+            ):
+                return existing
+
+        base_name = f"{satellite_class.__name__.lower()}__sat"
+        taken = {sa.alias_name for sa in self.satellite_aliases}
+        alias_name = base_name
+        counter = 0
+        while alias_name in taken:
+            counter += 1
+            alias_name = f"{base_name}_{counter}"
+
+        new_alias = SatelliteAlias(
+            alias_name=alias_name,
+            subquery_builder=subquery_builder(
+                satellite_class=satellite_class,
+                hub_satellite_filter=hub_satellite_filter,
+            ),
+        )
+        self.satellite_aliases.append(new_alias)
+        return new_alias
 
     def _add_class(
         self,

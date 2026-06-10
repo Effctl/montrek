@@ -1,5 +1,6 @@
 import datetime
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Any, cast
 from collections.abc import Mapping
@@ -22,6 +23,9 @@ from baseclasses.repositories.db.db_writer import DbWriter
 from baseclasses.repositories.query_builder import QueryBuilder
 from baseclasses.repositories.subquery_builder import (
     CrossSatelliteFilter,
+    LinkedHubIdSubqueryBuilder,
+    LinkedHubJsonField,
+    LinkedHubPairedJsonSubqueryBuilder,
     LinkedSatelliteSubqueryBuilder,
     ReverseLinkedSatelliteSubqueryBuilder,
     SatelliteSubqueryBuilder,
@@ -39,6 +43,7 @@ from baseclasses.utils import (
 from django.core.exceptions import PermissionDenied
 from django.db import models
 from django.db.models import F, QuerySet
+from django.db.models.fields.related import ManyToManyRel
 from django.utils import timezone
 from django_pandas.io import read_frame
 
@@ -60,6 +65,7 @@ class MontrekRepository:
     view_model: None | type[models.Model] = None
     display_field_names: Mapping[str, str] = {}
     field_help_texts: Mapping[str, str] = {}
+    consider_session_dates: bool = False
 
     update: bool = (
         True  # If this is true only the passed fields will be updated, otherwise empty fields will be set to None
@@ -70,7 +76,11 @@ class MontrekRepository:
         self._ts_queryset_containers = []
         self.session_data = session_data if session_data is not None else {}
         self.query_builder = QueryBuilder(
-            self.annotator, self.session_data, self.latest_ts
+            self.annotator,
+            self.session_data,
+            self.latest_ts,
+            self.session_start_date,
+            self.session_end_date,
         )
         self._reference_date = None
         self.messages = []
@@ -208,7 +218,13 @@ class MontrekRepository:
     def get_view_model_query(self, apply_filter: bool = True) -> QuerySet:
         query = self.view_model.objects.all()
         if apply_filter:
-            query_builder = QueryBuilder(self.annotator, self.session_data)
+            query_builder = QueryBuilder(
+                self.annotator,
+                self.session_data,
+                self.latest_ts,
+                self.session_start_date,
+                self.session_end_date,
+            )
             query = query_builder._apply_order(query, self.order_fields())
             query = query_builder._apply_filter(query)
         return query
@@ -256,15 +272,30 @@ class MontrekRepository:
 
     @property
     def session_end_date(self) -> timezone.datetime:
-        return self._get_session_date("end_date", timezone.datetime.max)
+        if self.consider_session_dates:
+            return self._get_session_date("end_date", timezone.datetime.max)
+        return self._ensure_aware_datetime(timezone.datetime.max)
 
     @property
     def session_start_date(self) -> timezone.datetime:
-        return self._get_session_date("start_date", timezone.datetime.min)
+        if self.consider_session_dates:
+            return self._get_session_date("start_date", timezone.datetime.min)
+        return self._ensure_aware_datetime(timezone.datetime.min)
 
     @property
     def session_user_id(self) -> int | None:
         return self.session_data.get("user_id")
+
+    def _ensure_aware_datetime(self, value: timezone.datetime) -> timezone.datetime:
+        if isinstance(value, datetime.date) and not isinstance(
+            value, datetime.datetime
+        ):
+            value = datetime.datetime(value.year, value.month, value.day)
+        if not isinstance(value, datetime.datetime):
+            return value
+        if timezone.is_naive(value):
+            return datetime_to_montrek_time(value)
+        return value
 
     def _get_session_date(
         self, date_type: str, default: timezone.datetime
@@ -272,7 +303,7 @@ class MontrekRepository:
         date_value = self.session_data.get(date_type, default)
         if isinstance(date_value, str):
             date_value = timezone.datetime.strptime(date_value, "%Y-%m-%d")
-        return timezone.make_aware(date_value, timezone.get_current_timezone())
+        return self._ensure_aware_datetime(date_value)
 
     @reference_date.setter
     def reference_date(self, value):
@@ -310,7 +341,13 @@ class MontrekRepository:
         return self.annotator.get_annotated_field_names()
 
     def get_link_names(self) -> list[str]:
-        return [f.name for f in self.hub_class._meta.many_to_many]
+        forward = [f.name for f in self.hub_class._meta.many_to_many]
+        reverse = [
+            f.get_accessor_name()
+            for f in self.hub_class._meta.get_fields()
+            if isinstance(f, ManyToManyRel)
+        ]
+        return forward + reverse
 
     def std_create_object(self, data: dict[str, Any]) -> MontrekHubABC:
         return self.create_by_dict(data)
@@ -339,7 +376,46 @@ class MontrekRepository:
         *,
         rename_field_map: dict[str, str] | None = None,
         ts_agg_func: str | None = None,
+        hub_satellite_filter: dict[str, Any] | None = None,
     ):
+        """Annotate fields from a satellite onto the queryset.
+
+        For timeseries satellites, each HubValueDate row is annotated with the
+        satellite that belongs to that specific HVD (one-to-one, by date).
+
+        ``hub_satellite_filter`` changes this behaviour: instead of looking up
+        the satellite for the current HVD, the subquery searches across *all*
+        HVDs for the hub and returns the latest satellite that matches the
+        filter.  The filter accepts any ORM lookup, including:
+
+        - A satellite field value: ``{"field": 0.1}``
+        - A date constraint: ``{"hub_value_date__value_date_list__value_date": some_date}``
+        - A relative date via OuterRef (e.g. previous period):
+          ``{"hub_value_date__value_date_list__value_date__lt": OuterRef("value_date_list__value_date")}``
+
+        Because hub_satellite_filter annotates the same hub-level value onto
+        every HVD row, it only makes sense when ``latest_ts=True`` (one row per
+        hub).  A UserWarning is raised if ``hub_satellite_filter`` is set while
+        ``latest_ts=False``.
+
+        The same satellite class may be annotated multiple times with different
+        filters (e.g. current values without a filter and previous values with
+        one); each distinct filter gets its own alias subquery so no work is
+        duplicated.
+        """
+        if (
+            satellite_class.is_timeseries
+            and hub_satellite_filter
+            and not self.latest_ts
+        ):
+            warnings.warn(
+                f"hub_satellite_filter on TS satellite '{satellite_class.__name__}' in "
+                f"'{type(self).__name__}' switches to hub-level correlation, which only "
+                f"makes sense with latest_ts=True. With latest_ts=False every HVD row is "
+                f"annotated with the same filtered value — set latest_ts=True on the repository.",
+                UserWarning,
+                stacklevel=2,
+            )
         if satellite_class.is_timeseries:
             subquery_builder = TSSatelliteSubqueryBuilder
         else:
@@ -352,6 +428,7 @@ class MontrekRepository:
             subquery_builder,
             rename_field_map=rename_field_map,
             ts_agg_func=ts_agg_func,
+            hub_satellite_filter=hub_satellite_filter,
         )
 
     def add_linked_satellites_field_annotations(
@@ -364,10 +441,12 @@ class MontrekRepository:
         rename_field_map: dict[str, str] | None = None,
         parent_link_classes: tuple[type[MontrekLinkABC], ...] = (),
         parent_link_reversed: tuple[bool] | list[bool] | None = None,
-        agg_func: str = "string_concat",
+        agg_func: str = "json_agg",
         link_satellite_filter: dict[str, Any] | None = None,
         cross_satellite_filters: tuple[CrossSatelliteFilter, ...] = (),
         separator: str = ";",
+        value_date_scope_path: str = "",
+        link_hub_value_date_filter: dict[str, Any] | None = None,
     ):
         if reversed_link:
             link_subquery_builder_class = ReverseLinkedSatelliteSubqueryBuilder
@@ -397,8 +476,69 @@ class MontrekRepository:
             link_satellite_filter=link_satellite_filter,
             cross_satellite_filters=cross_satellite_filters,
             separator=separator,
+            value_date_scope_path=value_date_scope_path,
+            link_hub_value_date_filter=link_hub_value_date_filter,
         )
         self.linked_fields.extend(fields)
+
+    def add_linked_hub_id(
+        self,
+        link_class: type[MontrekLinkABC],
+        output_name: str,
+        *,
+        reversed_link: bool = False,
+        parent_link_classes: tuple[type[MontrekLinkABC], ...] = (),
+        parent_link_reversed: tuple[bool] | list[bool] | None = None,
+    ):
+        if link_class not in self.annotator.get_link_classes():
+            self.annotator.annotated_link_classes.append(link_class)
+
+        self.annotator.annotations[output_name] = LinkedHubIdSubqueryBuilder(
+            link_class, reversed_link, parent_link_classes, parent_link_reversed
+        )
+        self.annotator.field_type_map[output_name] = models.IntegerField(
+            null=True, blank=True
+        )
+        self.annotator._field_names_in_order.append(output_name)
+
+    def add_linked_hub_paired_json_annotation(
+        self,
+        satellite_class: type[MontrekSatelliteABC | MontrekTimeSeriesSatelliteABC],
+        field: str,
+        link_class: type[MontrekLinkABC],
+        extra_json_fields: tuple[LinkedHubJsonField, ...],
+        output_name: str,
+        *,
+        reversed_link: bool = False,
+        link_satellite_filter: dict[str, object] | None = None,
+    ):
+        """Annotate output_name with a JSON array of paired objects, one per
+        linked hub-value-date row, combining `field` from `satellite_class`
+        with the fields described in `extra_json_fields`.
+
+        Use this instead of separate add_linked_satellites_field_annotations
+        calls with agg_func="json_agg" when the resulting arrays must stay
+        pointwise paired: independently aggregated arrays carry no guarantee
+        that the database returns them in the same row order, so positional
+        pairing (e.g. via zip()) on the consuming side is unreliable.
+        """
+        self.annotator.add_to_annotated_satellite_classes(satellite_class)
+        if link_class not in self.annotator.get_link_classes():
+            self.annotator.annotated_link_classes.append(link_class)
+
+        self.annotator.annotations[output_name] = LinkedHubPairedJsonSubqueryBuilder(
+            satellite_class,
+            field,
+            link_class,
+            extra_json_fields,
+            reversed_link=reversed_link,
+            link_satellite_filter=link_satellite_filter,
+        )
+        self.annotator.field_type_map[output_name] = models.CharField(
+            null=True, blank=True
+        )
+        self.annotator._field_names_in_order.append(output_name)
+        self.linked_fields.append(output_name)
 
     def get_history_queryset(self, pk: int, **kwargs) -> dict[str, QuerySet]:
         hub = self.get_hub_by_id(pk=pk)

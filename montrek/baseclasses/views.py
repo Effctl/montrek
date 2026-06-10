@@ -25,6 +25,7 @@ from reporting.managers.latex_report_manager import LatexReportManager
 from reporting.managers.montrek_details_manager import MontrekDetailsManager
 from reporting.managers.montrek_table_manager import (
     HistoryDataTableManager,
+    MontrekDataFrameTableManager,
     MontrekTableManager,
 )
 from rest_framework import status
@@ -283,9 +284,11 @@ class MontrekListView(
         context = super().get_context_data(**kwargs)
         context = self.get_page_context(context, **kwargs)
         self.show_messages()
-        if not isinstance(self.manager, MontrekTableManager):
+        if not isinstance(
+            self.manager, MontrekTableManager | MontrekDataFrameTableManager
+        ):
             raise ValueError(
-                f"Manager {self.manager.__class__.__name__} must be of type MontrekTableManager"
+                f"Manager {self.manager.__class__.__name__} must be of type MontrekTableManager or MontrekDataFrameTableManager"
             )
         table = self.manager.to_html()
         context["table"] = table
@@ -485,9 +488,9 @@ class MontrekDetailView(
 
     def _set_hub_value_date_pk(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         hub_value_date_pk = (
-            self.manager_class.repository_class.hub_class.objects.all()
-            .get(pk=kwargs["pk"])
-            .get_hub_value_date()
+            self.manager_class.repository_class()
+            .receive()
+            .get(hub_entity_id=kwargs["pk"])
             .pk
         )
         kwargs["pk"] = hub_value_date_pk
@@ -536,7 +539,7 @@ class MontrekCreateUpdateView(
     is_compact_form: bool = False
     template_name = "montrek_create.html"
     compact_template_name = "montrek_create_compact.html"
-    do_return_to_referer: bool = True
+    do_return_to_referer: bool = False
     success_url = "under_construction"
     title = ""
 
@@ -602,6 +605,8 @@ class MontrekCreateView(MontrekCreateUpdateView):
 
 
 class MontrekUpdateView(MontrekCreateUpdateView):
+    go_to_details: bool = False
+
     def _get_initial(self) -> dict:
         return self.manager.get_object_from_pk_as_dict(self.kwargs["pk"])
 
@@ -629,6 +634,27 @@ class MontrekUpdateView(MontrekCreateUpdateView):
         context = super().get_context_data(**kwargs)
         context["tag"] = "Update"
         return context
+
+    def get_success_url(self):
+        """
+        Return the post-update redirect target.
+
+        If ``do_return_to_referer`` is enabled, defer to the parent
+        implementation so the user is sent back to the referring page.
+        Otherwise, return the configured ``success_url`` directly when
+        ``go_to_details`` is false, or reverse ``success_url`` with the
+        session ``pk`` when redirecting to a details view. If no session
+        ``pk`` is available, fall back to reversing ``success_url``
+        without kwargs.
+        """
+        if self.do_return_to_referer:
+            return super().get_success_url()
+        if not self.go_to_details:
+            return reverse(self.success_url)
+        object_pk = self.session_data.get("pk")
+        if object_pk is not None:
+            return reverse(self.success_url, kwargs={"pk": object_pk})
+        return reverse(self.success_url)
 
 
 class MontrekDeleteView(

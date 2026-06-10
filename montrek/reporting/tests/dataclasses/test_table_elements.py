@@ -21,7 +21,7 @@ class MockTableElement(te.AttrTableElement):
 
 
 class MockTableElementCustomHoverText(te.StringTableElement):
-    def get_hover_text(self, obj: Any) -> str | None:
+    def get_hover_text(self, obj: Any, _val: Any) -> str | None:
         return f"Hover from field {obj[str(self.hover_text)]}"
 
 
@@ -1000,6 +1000,62 @@ class TestTableElements(TestCase, TableElementTestingToolMixin):
             expected_hover_text="hover_text",
         )
 
+    @mock.patch("reporting.dataclasses.table_elements.reverse")
+    def test_link_list_table_element__json_mode(self, mock_reverse):
+        fake_url = "fake_url"
+
+        def reverse_side_effect(*args, **kwargs):
+            value = kwargs["kwargs"]["list_kwarg"]
+            return f"/{fake_url}/{value}"
+
+        mock_reverse.side_effect = reverse_side_effect
+        test_element = te.LinkListTableElement(
+            name="name",
+            url=fake_url,
+            hover_text="hover_text",
+            text="text_attr",
+            static_kwargs={},
+            list_attr="list_attr",
+            list_kwarg="list_kwarg",
+            in_separator=None,
+        )
+        obj = {"list_attr": '["1", "2", "3"]', "text_attr": '["a", "b", "c"]'}
+        self.table_element_test_assertions_from_object(
+            table_element=test_element,
+            test_obj=obj,
+            expected_format='<div style="max-height: 300px; overflow-y: auto;">      <div><a id="id__fake_url_1" href="/fake_url/1">a</a></div>      <div><a id="id__fake_url_2" href="/fake_url/2">b</a></div>      <div><a id="id__fake_url_3" href="/fake_url/3">c</a></div>  </div>',
+            expected_format_latex=" \\color{black} a,b,c &",
+            expected_hover_text="hover_text",
+        )
+
+    @mock.patch("reporting.dataclasses.table_elements.reverse")
+    def test_link_list_table_element__json_mode__separator_in_value(self, mock_reverse):
+        fake_url = "fake_url"
+
+        def reverse_side_effect(*args, **kwargs):
+            value = kwargs["kwargs"]["list_kwarg"]
+            return f"/{fake_url}/{value}"
+
+        mock_reverse.side_effect = reverse_side_effect
+        test_element = te.LinkListTableElement(
+            name="name",
+            url=fake_url,
+            hover_text="hover_text",
+            text="text_attr",
+            static_kwargs={},
+            list_attr="list_attr",
+            list_kwarg="list_kwarg",
+            in_separator=None,
+        )
+        obj = {"list_attr": '["1"]', "text_attr": '["prompt; important"]'}
+        self.table_element_test_assertions_from_object(
+            table_element=test_element,
+            test_obj=obj,
+            expected_format='<div style="max-height: 300px; overflow-y: auto;">      <div><a id="id__fake_url_1" href="/fake_url/1">prompt; important</a></div>  </div>',
+            expected_format_latex=" \\color{black} prompt; important &",
+            expected_hover_text="hover_text",
+        )
+
     def test__get_dotted_attr_or_arg(self):
         """
         Test that the function returns the correct value when the
@@ -1108,6 +1164,40 @@ class TestTableElements(TestCase, TableElementTestingToolMixin):
             in test_link
         )
 
+    def test__get_link_text_filter__with_filter_field(self):
+        test_obj = TestMontrekSatelliteFactory.create()
+        table_element = te.LinkTextTableElement(
+            name="name",
+            url="dummy_detail",
+            text="test_name",
+            hover_text="hover_text",
+            kwargs={
+                "pk": "pk",
+                "filter": "test_name",
+                "filter_field": "custom_filter_field",
+            },
+        )
+        test_display_field = table_element.get_display_field(test_obj)
+        test_link = test_display_field.display_value
+        self.assertIn(
+            f"?filter_field=custom_filter_field&amp;filter_lookup=in&amp;filter_value={test_obj.test_name.replace(' ', '%20')}",
+            test_link,
+        )
+        self.assertNotIn("custom_filter_field", table_element.get_url_kwargs(test_obj))
+
+    def test__get_link_text_filter__filter_field_falls_back_to_filter(self):
+        test_obj = TestMontrekSatelliteFactory.create()
+        table_element = te.LinkTextTableElement(
+            name="name",
+            url="dummy_detail",
+            text="test_name",
+            hover_text="hover_text",
+            kwargs={"pk": "pk", "filter": "test_name"},
+        )
+        filter_params = table_element.get_filter(test_obj)
+        self.assertEqual(filter_params["filter_field"], "test_name")
+        self.assertEqual(filter_params["filter_value"], test_obj.test_name)
+
     def test__get_link_static_kwargs(self):
         test_obj = TestMontrekSatelliteFactory.create()
         table_element = te.LinkTextTableElement(
@@ -1162,7 +1252,22 @@ class TestTableElements(TestCase, TableElementTestingToolMixin):
         self.table_element_test_assertions_from_value(
             table_element=table_element,
             value=0.50,
-            expected_format='<div class="bar-container"> <div class="bar" style="width: 50.0%;"></div> <span class="bar-value">50.00%</span> </div>',
+            expected_format='<div class="bar-container"> <div class="bar" style="width: 50.0%;"></div> <span class="bar-value">50%</span> </div>',
+            expected_format_latex="\\progressbar{ 50.0 }{ 50.00\\% } &",
+            expected_td_classes=["text-end"],
+            expected_style_attrs={"color": "#002F6C"},
+        )
+
+    @override_settings(NUMBER_FORMATTING=SystemFormatting.DE)
+    def test_progress_bar__html_german(self):
+        table_element = te.ProgressBarTableElement(
+            name="name",
+            attr="test_attr",
+        )
+        self.table_element_test_assertions_from_value(
+            table_element=table_element,
+            value=0.50,
+            expected_format='<div class="bar-container"> <div class="bar" style="width: 50.0%;"></div> <span class="bar-value">50%</span> </div>',
             expected_format_latex="\\progressbar{ 50.0 }{ 50.00\\% } &",
             expected_td_classes=["text-end"],
             expected_style_attrs={"color": "#002F6C"},
@@ -1230,6 +1335,262 @@ class TestTableElements(TestCase, TableElementTestingToolMixin):
             expected_format_latex="\\colorbox[rgb]{0.000,0.278,0.404}{\\textcolor[HTML]{FFFFFF}{\\textbf{ghi}}} &",
             expected_td_classes=["text-center"],
         )
+
+    def test_comparison_table_element__equal(self):
+        test_obj = {"value_1": 1, "value_2": 1}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format='<span class="bi bi-arrow-right-circle-fill text-success"></span>',
+            expected_format_latex="{\\color{green}$\\rightarrow$} &",
+            expected_hover_text="1 = 1",
+        )
+
+    def test_comparison_table_element__greater(self):
+        # 20 % above comp_value → within much_comp_limit (0.5) → GREATER
+        test_obj = {"value_1": 12, "value_2": 10}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format='<span class="bi bi-arrow-up-right-circle-fill text-warning"></span>',
+            expected_format_latex="{\\color{orange}$\\nearrow$} &",
+            expected_hover_text="12 > 10",
+        )
+
+    def test_comparison_table_element__much_greater(self):
+        # 60 % above comp_value → exceeds much_comp_limit (0.5) → MUCH_GREATER
+        test_obj = {"value_1": 16, "value_2": 10}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format='<span class="bi bi-arrow-up-circle-fill text-danger"></span>',
+            expected_format_latex="{\\color{red}$\\uparrow$} &",
+            expected_hover_text="16 >> 10",
+        )
+
+    def test_comparison_table_element__less(self):
+        # 20 % below comp_value → within much_comp_limit (0.5) → LESS
+        test_obj = {"value_1": 8, "value_2": 10}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format='<span class="bi bi-arrow-down-right-circle-fill text-warning"></span>',
+            expected_format_latex="{\\color{orange}$\\searrow$} &",
+            expected_hover_text="8 < 10",
+        )
+
+    def test_comparison_table_element__much_less(self):
+        # 60 % below comp_value → exceeds much_comp_limit (0.5) → MUCH_LESS
+        test_obj = {"value_1": 4, "value_2": 10}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format='<span class="bi bi-arrow-down-circle-fill text-danger"></span>',
+            expected_format_latex="{\\color{red}$\\downarrow$} &",
+            expected_hover_text="4 << 10",
+        )
+
+    def test_comparison_table_element__none_value(self):
+        test_obj = {"value_1": None, "value_2": 10}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format="<span></span>",
+            expected_format_latex=" &",
+            expected_hover_text="None Unknown 10",
+        )
+
+    def test_comparison_table_element__none_comp_value(self):
+        test_obj = {"value_1": 10, "value_2": None}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format="<span></span>",
+            expected_format_latex=" &",
+            expected_hover_text="10 Unknown None",
+        )
+
+    def test_comparison_table_element__custom_much_comp_limit(self):
+        # With a tighter limit of 0.1, a 20 % difference triggers MUCH_GREATER/MUCH_LESS
+
+        class TightComparisonTableElement(te.ComparisonTableElement):
+            much_comp_limit = 0.1
+
+        table_element = TightComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj={"value_1": 12, "value_2": 10},
+            expected_format='<span class="bi bi-arrow-up-circle-fill text-danger"></span>',
+            expected_format_latex="{\\color{red}$\\uparrow$} &",
+            expected_hover_text="12 >> 10",
+        )
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj={"value_1": 8, "value_2": 10},
+            expected_format='<span class="bi bi-arrow-down-circle-fill text-danger"></span>',
+            expected_format_latex="{\\color{red}$\\downarrow$} &",
+            expected_hover_text="8 << 10",
+        )
+
+    def test_comparison_table_element__comp_value_zero_greater(self):
+        # comp_value == 0 with a positive value → always MUCH_GREATER (no division)
+        test_obj = {"value_1": 5, "value_2": 0}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format='<span class="bi bi-arrow-up-circle-fill text-danger"></span>',
+            expected_format_latex="{\\color{red}$\\uparrow$} &",
+            expected_hover_text="5 >> 0",
+        )
+
+    def test_comparison_table_element__comp_value_zero_less(self):
+        # comp_value == 0 with a negative value → always MUCH_LESS (no division)
+        test_obj = {"value_1": -5, "value_2": 0}
+        table_element = te.ComparisonTableElement(
+            name="name", attr="value_1", comp_attr="value_2"
+        )
+
+        self.table_element_test_assertions_from_object(
+            table_element=table_element,
+            test_obj=test_obj,
+            expected_format='<span class="bi bi-arrow-down-circle-fill text-danger"></span>',
+            expected_format_latex="{\\color{red}$\\downarrow$} &",
+            expected_hover_text="-5 << 0",
+        )
+
+
+class TestCompDataField(TestCase):
+    """Tests for CompDataField and its wiring into ComparisonTableElement.
+
+    Before the fix, ComparisonTableElement inherited ``serializer_field_class =
+    serializers.CharField`` from AttrTableElement, which caused DRF to call
+    ``str()`` on CompData instances.  That made the DRF JSON response contain a
+    plain string while ``manager.to_json()`` returned the raw Python object —
+    the two sides of the REST-API test assertion would differ in type.
+
+    The fix introduces CompDataField (which emits a structured dict) and
+    TableSerializer._format_value also converts CompData → dict, so both
+    serialisation paths agree.
+    """
+
+    def setUp(self):
+        self.field = te.CompDataField()
+
+    def test_to_representation_with_comp_data_instance(self):
+        """A raw CompData instance is converted to a dict."""
+        comp_data = te.CompValues.EQUAL.value
+        result = self.field.to_representation(comp_data)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(
+            result,
+            {
+                "num": 0,
+                "latex_val": "{\\color{green}$\\rightarrow$}",
+                "hover_text": "=",
+            },
+        )
+
+    def test_to_representation_with_already_converted_dict(self):
+        """A pre-converted dict (from TableSerializer) is returned unchanged.
+
+        manager.to_json() pre-processes values via TableSerializer._format_value,
+        so by the time DRF's CompDataField.to_representation is called the value
+        is already a dict.  The field must pass it through without raising.
+        """
+        already_dict = {
+            "num": 1,
+            "latex_val": "{\\color{orange}$\\nearrow$}",
+            "hover_text": ">",
+        }
+        result = self.field.to_representation(already_dict)
+        self.assertEqual(result, already_dict)
+
+    def test_to_representation_with_none(self):
+        """None is returned as-is (represents a missing value)."""
+        self.assertIsNone(self.field.to_representation(None))
+
+    def test_to_representation_with_unexpected_type_raises(self):
+        """Any type other than CompData, dict, or None raises ValidationError.
+
+        Without this guard, dataclasses.asdict() would raise TypeError and
+        surface as a 500 instead of a clean API error.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            self.field.to_representation("CompData(num=0, ...)")  # stale string
+
+    def test_to_internal_value_reconstructs_comp_data(self):
+        """A dict round-trips back to a CompData instance."""
+        data = {
+            "num": -1,
+            "latex_val": "{\\color{orange}$\\searrow$}",
+            "hover_text": "<",
+        }
+        result = self.field.to_internal_value(data)
+        self.assertIsInstance(result, te.CompData)
+        self.assertEqual(result.num, -1)
+        self.assertEqual(result.hover_text, "<")
+
+    def test_to_internal_value_coerces_num_to_int(self):
+        """num is coerced to int so e.g. "0" from a JSON string body still works."""
+        data = {"num": "0", "latex_val": "", "hover_text": "="}
+        result = self.field.to_internal_value(data)
+        self.assertIsInstance(result.num, int)
+
+    def test_to_internal_value_not_a_dict_raises(self):
+        """Passing a non-dict raises ValidationError, not TypeError → no 500."""
+        from rest_framework.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            self.field.to_internal_value("bad input")
+
+    def test_to_internal_value_missing_keys_raises(self):
+        """A dict missing any required key raises ValidationError."""
+        from rest_framework.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            self.field.to_internal_value({"num": 0})  # latex_val and hover_text absent
+
+    def test_comparison_table_element_uses_comp_data_field(self):
+        """ComparisonTableElement.serializer_field_class is CompDataField."""
+        elem = te.ComparisonTableElement(name="test", attr="val", comp_attr="other")
+        self.assertIs(elem.serializer_field_class, te.CompDataField)
 
 
 @dataclass

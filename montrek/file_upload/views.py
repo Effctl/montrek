@@ -81,9 +81,16 @@ class MontrekUploadFileView(MontrekTemplateView):
     def get_file(self, form: Form) -> str:
         return form.cleaned_data["file"]
 
-    def _check_file_type(self, file: TextIO) -> bool:
+    def _check_file_type(self, file: TextIO | None) -> bool:
         expected_file_types = self.accept.split(",")
         expected_file_types = [e.lstrip(".").upper() for e in expected_file_types]
+        if file is None:
+            messages.error(
+                self.request,
+                "No file attached",
+            )
+            return False
+
         actual_file_type = file.name.split(".")[-1].upper()
         if actual_file_type not in expected_file_types:
             messages.error(

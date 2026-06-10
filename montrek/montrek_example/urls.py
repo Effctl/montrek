@@ -14,6 +14,11 @@ urlpatterns = [
     ),
     path("a/list", views.MontrekExampleAList.as_view(), name="montrek_example_a_list"),
     path(
+        "a/df_list",
+        views.MontrekExampleADataFrameList.as_view(),
+        name="montrek_example_a_df_list",
+    ),
+    path(
         "a/download",
         views.MontrekExampleADownloadView.as_view(),
         name="montrek_example_a_download",
@@ -68,6 +73,11 @@ urlpatterns = [
         "a/<int:pk>/history",
         views.MontrekExampleAHistory.as_view(),
         name="montrek_example_a_history",
+    ),
+    path(
+        "b/<int:pk>/details",
+        views.MontrekExampleBDetails.as_view(),
+        name="montrek_example_b_details",
     ),
     path(
         "c/<int:pk>/history",
@@ -160,6 +170,11 @@ urlpatterns = [
         name="do_a2_upload",
     ),
     path(
+        "do_a2_direct_upload",
+        views.A2ApiDirectUploadView.as_view(),
+        name="do_a2_direct_upload",
+    ),
+    path(
         "a1_file_upload_history/<int:pk>",
         views.MontrekExampleA1UploadHistoryView.as_view(),
         name="a1_file_upload_history",
@@ -180,5 +195,25 @@ urlpatterns = [
         "hub_a/redirect/<int:pk>/",
         views.HubARedirectView.as_view(),
         name="hub_a_redirect",
+    ),
+    path(
+        "hub_c/<int:pk>/details",
+        views.MontrekExampleCLastTSDetails.as_view(),
+        name="montrek_example_c_last_ts_details",
+    ),
+    path(
+        "hub_a/file_export/trigger",
+        views.HubAFileExportTriggerView.as_view(),
+        name="hub_a_file_export_trigger",
+    ),
+    path(
+        "hub_a/file_export/list",
+        views.HubAFileExportRegistryListView.as_view(),
+        name="hub_a_file_export_list",
+    ),
+    path(
+        "hub_a/file_export/download/<int:pk>",
+        views.HubAFileExportDownloadView.as_view(),
+        name="hub_a_file_export_download",
     ),
 ]

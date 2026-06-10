@@ -26,6 +26,7 @@ class HubBRepository(MontrekRepository):
             me_models.LinkHubBHubD,
             ["hub_entity_id", "field_d1_str", "field_d1_int"],
             rename_field_map={"hub_entity_id": "hub_d_id"},
+            agg_func="string_concat",
             separator=",",
         )
 
@@ -48,6 +49,51 @@ class HubBRepository2(MontrekRepository):
             me_models.LinkHubAHubB,
             ["field_a1_int"],
             reversed_link=True,
+        )
+
+
+class HubBRepositoryDirectLinkHub(MontrekRepository):
+    hub_class = me_models.HubB
+
+    def set_annotations(self):
+        self.add_satellite_fields_annotations(
+            me_models.SatB1,
+            [
+                "field_b1_str",
+            ],
+        )
+        self.add_linked_satellites_field_annotations(
+            me_models.SatD1,
+            me_models.LinkHubBHubD,
+            ["hub_entity_id"],
+            rename_field_map={"hub_entity_id": "hub_d_id"},
+        )
+        self.add_linked_satellites_field_annotations(
+            me_models.SatA1,
+            me_models.LinkHubAHubB,
+            ["hub_entity_id"],
+            rename_field_map={"hub_entity_id": "hub_a_id"},
+            reversed_link=True,
+        )
+        self.add_linked_satellites_field_annotations(
+            me_models.SatC1,
+            me_models.LinkHubCHubD,
+            ["hub_entity_id"],
+            rename_field_map={"hub_entity_id": "hub_c_id"},
+            reversed_link=True,
+            parent_link_classes=(me_models.LinkHubBHubD,),
+            parent_link_reversed=(False,),
+        )
+        self.add_linked_hub_id(me_models.LinkHubBHubD, "hub_d_direct_id")
+        self.add_linked_hub_id(
+            me_models.LinkHubAHubB, "hub_a_direct_id", reversed_link=True
+        )
+        self.add_linked_hub_id(
+            me_models.LinkHubCHubD,
+            "hub_c_direct_id",
+            reversed_link=True,
+            parent_link_classes=(me_models.LinkHubBHubD,),
+            parent_link_reversed=(False,),
         )
 
 

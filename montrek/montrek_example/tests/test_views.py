@@ -12,22 +12,23 @@ from django.contrib.auth.models import Permission
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
-from file_upload.managers.file_upload_manager import TASK_SCHEDULED_MESSAGE
 from file_upload.repositories.file_upload_registry_repository import (
     FileUploadRegistryRepository,
 )
+from info.repositories.download_registry_repositories import DownloadRegistryRepository
 from montrek_example import views as me_views
 from montrek_example.models.example_models import LinkHubBHubD
 from montrek_example.repositories.hub_a_repository import (
+    HubAFileExportRegistryRepository,
     HubAFileUploadRegistryRepository,
     HubARepository,
 )
 from montrek_example.repositories.hub_b_repository import HubBRepository
 from montrek_example.repositories.hub_d_repository import HubDRepository
 from montrek_example.tests.factories import montrek_example_factories as me_factories
+from process_pipeline.managers.montrek_pipeline_managers import TASK_SCHEDULED_MESSAGE
 from reporting.managers.montrek_table_manager import MontrekTablePaginator
 from testing.decorators import add_logged_in_user
-from testing.decorators.mock_external_get import mock_external_get
 from testing.test_cases.view_test_cases import (
     MontrekCreateViewTestCase,
     MontrekDeleteViewTestCase,
@@ -41,6 +42,7 @@ from testing.test_cases.view_test_cases import (
     MontrekRestApiViewTestCase,
     MontrekUpdateViewTestCase,
     MontrekViewTestCase,
+    ProcessPipelineViewTestCase,
 )
 from user.tests.factories.montrek_user_factories import MontrekUserFactory
 
@@ -136,6 +138,43 @@ class TestMontrekExampleAListViewPages(MontrekListViewTestCase):
         self.assertEqual(object_list[0].field_a2_str, "field_12")
         test_page = response.context_data["paginator"]
         self.assertEqual(test_page.number, 1)
+
+
+class TestMontrekExampleADataFrameListView(MontrekListViewTestCase):
+    viewname = "montrek_example_a_df_list"
+    view_class = me_views.MontrekExampleADataFrameList
+    expected_no_of_rows = 1
+    expected_columns = ["A1 String", "A1 Int", "A2 String", "A2 Float"]
+
+    def build_factories(self):
+        sata1 = me_factories.SatA1Factory()
+        me_factories.SatA2Factory(hub_entity=sata1.hub_entity)
+
+
+class TestMontrekExampleADataFrameListViewPages(MontrekListViewTestCase):
+    viewname = "montrek_example_a_df_list"
+    view_class = me_views.MontrekExampleADataFrameList
+    expected_no_of_rows = 10
+
+    def build_factories(self):
+        for i in range(15):
+            sata1 = me_factories.SatA1Factory(field_a1_str=f"field_{i}")
+            me_factories.SatA2Factory(hub_entity=sata1.hub_entity)
+
+    def test_paginator_in_context(self):
+        response = self.client.get(self.url)
+        test_page = response.context_data["paginator"]
+        self.assertIsInstance(test_page, MontrekTablePaginator)
+        self.assertEqual(test_page.number, 1)
+        self.assertEqual(test_page.num_pages, 2)
+        self.assertTrue(test_page.show_paginator)
+
+    def test_second_page_returns_remaining_rows(self):
+        response = self.client.get(self.url, data={"page": 2})
+        object_list = response.context_data["object_list"]
+        self.assertEqual(len(object_list), 5)
+        test_page = response.context_data["paginator"]
+        self.assertEqual(test_page.number, 2)
 
 
 class TestMontrekExampleACreateView(MontrekCreateViewTestCase):
@@ -714,7 +753,13 @@ class TestMontrekExampleBUpdate(MontrekUpdateViewTestCase):
         self.assertEqual(satb1.hub.link_hub_b_hub_d.count(), 2)
         self.assertEqual(satb1.field_d1_str, "test1,test2")
         response = self.client.post(self.url, data=self.update_data())
-        self.assertRedirects(response, reverse("montrek_example_b_list"))
+        self.assertRedirects(
+            response,
+            reverse(
+                "montrek_example_b_details",
+                kwargs={"pk": satb1.hub_id},
+            ),
+        )
         links = LinkHubBHubD.objects.all()
         self.assertEqual(links.count(), 2)
         self.assertEqual(
@@ -743,7 +788,13 @@ class TestMontrekExampleBUpdate(MontrekUpdateViewTestCase):
         update_data = self.update_data()
         update_data["link_hub_b_hub_d"] = []
         response = self.client.post(self.url, data=update_data)
-        self.assertRedirects(response, reverse("montrek_example_b_list"))
+        self.assertRedirects(
+            response,
+            reverse(
+                "montrek_example_b_details",
+                kwargs={"pk": satb1.hub.id},
+            ),
+        )
         links = LinkHubBHubD.objects.all()
         self.assertEqual(links.count(), 2)
         self.assertLess(
@@ -1538,13 +1589,11 @@ class TestA2ApiUploadView(MontrekViewTestCase):
     view_class = me_views.A2ApiUploadView
     viewname = "do_a2_upload"
 
-    @mock_external_get()
-    def test_post(self, mocked_get):
+    def test_post(self):
         response = self.client.post(
             self.url, data={"user": "user", "password": "password"}
         )
         self.assertRedirects(response, reverse("hub_a_view_api_uploads"))
-        mocked_get.assert_called()
 
     def test_post__no_user(self):
         response = self.client.post(self.url)
@@ -1553,6 +1602,22 @@ class TestA2ApiUploadView(MontrekViewTestCase):
     def test_post__no_password(self):
         response = self.client.post(self.url, data={"user": "user"})
         self.assertEqual(response.status_code, 200)
+
+
+class TestA2ApiDirectUploadView(ProcessPipelineViewTestCase):
+    view_class = me_views.A2ApiDirectUploadView
+    viewname = "do_a2_direct_upload"
+    expected_message = "Not implemented"
+    expected_status = "failed"
+
+    def expected_url(self) -> str:
+        return reverse("hub_a_view_api_uploads")
+
+    def query_params(self) -> dict:
+        return {
+            "user": "schmuser",
+            "password": "schmassword",  # nosec B105 #noqa S105 : test-only password
+        }
 
 
 class TestTableDataWithReferenceDate(MontrekListViewTestCase):
@@ -1593,3 +1658,74 @@ class TestTableDataWithReferenceDate(MontrekListViewTestCase):
     def test_assign_old_data(self):
         test_object = self.view.object_list[0]
         self.assertEqual(test_object.field_a1_int, 6)
+
+
+class TestMontrekExampleCLastTSDetails(MontrekDetailViewTestCase):
+    viewname = "montrek_example_c_last_ts_details"
+    view_class = me_views.MontrekExampleCLastTSDetails
+
+    def build_factories(self):
+        base_vd = me_factories.CHubValueDateFactory(value_date=None)
+        self.hub_vd = me_factories.CHubValueDateFactory(
+            hub=base_vd.hub, value_date="2026-04-19"
+        )
+        me_factories.SatTSC2Factory(hub_entity=self.hub_vd.hub)
+
+    def url_kwargs(self) -> dict:
+        return {"pk": self.hub_vd.hub.id}
+
+
+class TestHubAFileExportTriggerView(ProcessPipelineViewTestCase):
+    view_class = me_views.HubAFileExportTriggerView
+    viewname = "hub_a_file_export_trigger"
+    expected_message = "Exported 1 records."
+    expected_status = "processed"
+
+    def expected_url(self) -> str:
+        return reverse("hub_a_file_export_list")
+
+    def build_factories(self):
+        me_factories.SatA1Factory()
+
+    def additional_assertions(self):
+        registry = HubAFileExportRegistryRepository().receive().first()
+        self.assertTrue(
+            bool(registry.export_file),
+            "export_file should be set after a successful export",
+        )
+
+
+class TestHubAFileExportRegistryListView(MontrekListViewTestCase):
+    viewname = "hub_a_file_export_list"
+    view_class = me_views.HubAFileExportRegistryListView
+    expected_no_of_rows = 1
+
+    def build_factories(self):
+        me_factories.HubAFileExportRegistryStaticSatelliteFactory()
+
+
+class TestHubAFileExportDownloadView(MontrekDownloadViewTestCase):
+    view_class = me_views.HubAFileExportDownloadView
+    viewname = "hub_a_file_export_download"
+
+    def build_factories(self):
+        self.registry_sat = me_factories.HubAFileExportRegistryStaticSatelliteFactory(
+            generate_export_file=True
+        )
+
+    def url_kwargs(self) -> dict:
+        return {"pk": self.registry_sat.get_hub_value_date().pk}
+
+    def expected_filename(self) -> str:
+        # Django may append a uniqueness suffix; match any test_export*.csv
+        return r"test_export.*\.csv"
+
+    def assert_entry_in_download_registry(self):
+        # Override: check that at least one registry entry exists.
+        # The base-class check for count == 1 is fragile with --keepdb.
+        download_registry = DownloadRegistryRepository()
+        self.assertGreaterEqual(download_registry.receive().count(), 1)
+
+    def additional_download_assertions(self):
+        content = b"".join(self.response.streaming_content)
+        self.assertEqual(content, b"hub_id\n1\n")

@@ -1,11 +1,15 @@
 import datetime
+import json
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 from baseclasses.errors.montrek_user_error import MontrekError
 from baseclasses.repositories.montrek_repository import MontrekRepository
-from baseclasses.repositories.subquery_builder import CrossSatelliteFilter
+from baseclasses.repositories.subquery_builder import (
+    CrossSatelliteFilter,
+    ReverseLinkedSatelliteSubqueryBuilder,
+)
 from baseclasses.tests.factories.montrek_factory_schemas import ValueDateListFactory
 from baseclasses.utils import montrek_time
 from django.core.exceptions import PermissionDenied
@@ -16,16 +20,19 @@ from freezegun import freeze_time
 from montrek_example.models import example_models as me_models
 from montrek_example.repositories.hub_a_repository import (
     HubAJsonRepository,
+    HubAQuerysetAwareRepository,
     HubARepository,
     HubARepository2,
     HubARepository3,
     HubARepository4,
     HubARepository5,
     HubARepository6,
+    HubATSLinkedRepository,
 )
 from montrek_example.repositories.hub_b_repository import (
     HubBRepository,
     HubBRepository2,
+    HubBRepositoryDirectLinkHub,
     HubBRepositoryWithCrossSatFilter,
 )
 from montrek_example.repositories.hub_c_repository import (
@@ -35,21 +42,28 @@ from montrek_example.repositories.hub_c_repository import (
     HubCRepositoryAll,
     HubCRepositoryCommonFields,
     HubCRepositoryCount,
+    HubCRepositoryDirectLinkHub,
+    HubCRepositoryJsonAgg,
     HubCRepositoryLast,
     HubCRepositoryLastTS,
     HubCRepositoryMean,
     HubCRepositoryOnlyStatic,
+    HubCRepositoryPropertyFilter,
     HubCRepositoryReversedParents,
     HubCRepositoryReversedParentsNoMatchingReversedParents,
     HubCRepositorySumTS,
     HubCRepositoryViewModel,
     HubCRepositoryWithManyToManyParents,
     HubCRepositoryWithManyToOneParents,
+    HubCRepositoryWithPairedJsonAnnotation,
+    HubCRepositoryWithValueDateScopedLink,
 )
 from montrek_example.repositories.hub_d_repository import (
     HubDRepository,
     HubDRepositoryReversedParentLink,
     HubDRepositoryTSReverseLink,
+    HubDTSLinkAggRepositorySum,
+    HubDTSLinkAggRepositoryWithLinkHubValueDateFilter,
 )
 from montrek_example.repositories.hub_e_repository import HubERepository
 from montrek_example.tests.factories import montrek_example_factories as me_factories
@@ -97,12 +111,12 @@ class TestMontrekRepositorySatellite(TestCase):
                 "created_at",
                 "created_by",
                 "comment",
-                "field_b1_str",
-                "field_b1_date",
                 "field_a1_int",
                 "field_a1_str",
                 "field_a2_float",
                 "field_a2_str",
+                "field_b1_str",
+                "field_b1_date",
                 "dummy1",
                 "dummy2",
             ],
@@ -118,6 +132,11 @@ class TestMontrekRepositorySatellite(TestCase):
         repo.rename_field("field_a1_str", "my_field_a1_str")  # direct satellite field
         repo.rename_field("field_b1_str", "my_field_b1_str")  # linked field
         test_fields = repo.get_all_annotated_fields()
+        # Fields are returned in registration order (set_annotations call order),
+        # with renames applied in-place.  HubARepository.set_annotations registers:
+        #   SatA1 (field_a1_int, field_a1_str), SatA2 (field_a2_float, field_a2_str),
+        #   SatB1 via LinkHubAHubB (field_b1_str, field_b1_date).
+        # The test then adds SatTSC2 (field_tsc2_float) and renames two fields.
         self.assertEqual(
             test_fields,
             [
@@ -126,16 +145,18 @@ class TestMontrekRepositorySatellite(TestCase):
                 "created_at",
                 "created_by",
                 "comment",
-                "field_b1_date",
-                "field_tsc2_float",
-                "my_field_b1_str",
                 "field_a1_int",
                 "my_field_a1_str",
                 "field_a2_float",
                 "field_a2_str",
+                "my_field_b1_str",
+                "field_b1_date",
+                "field_tsc2_float",
             ],
         )
-        # direct time series satellite fields
+        # Fields are returned in registration order.  HubCRepository.set_annotations
+        # registers direct satellite fields (SatTSC2, SatTSC3, SatTSC4, SatC1) first,
+        # then linked satellite fields (SatD1, SatTSD2 via LinkHubCHubD).
         repo = HubCRepository()
         test_fields = repo.get_all_annotated_fields()
         self.assertEqual(
@@ -146,12 +167,6 @@ class TestMontrekRepositorySatellite(TestCase):
                 "created_at",
                 "created_by",
                 "comment",
-                "field_d1_str",
-                "field_d1_int",
-                "field_tsd2_float",
-                "field_tsd2_int",
-                "field_tsd2_float_agg",
-                "field_tsd2_float_latest",
                 "field_tsc2_float",
                 "created_by__email",
                 "field_tsc3_int",
@@ -159,6 +174,12 @@ class TestMontrekRepositorySatellite(TestCase):
                 "field_tsc4_int",
                 "field_c1_bool",
                 "field_c1_str",
+                "field_d1_str",
+                "field_d1_int",
+                "field_tsd2_float",
+                "field_tsd2_int",
+                "field_tsd2_float_agg",
+                "field_tsd2_float_latest",
             ],
         )
 
@@ -716,6 +737,18 @@ class TestMontrekCreateTimeSeriesObject(TestCase):
         )
         queried_object = repository.receive().get()
         self.assertEqual(queried_object.field_a2_float, 0.0)
+
+    def test_write_reversed_links_via_data_frame(self):
+        repository = HubDRepository(session_data={"user_id": self.user.id})
+        sat_b = me_factories.SatB1Factory(field_b1_str="Test B")
+        input_data = pd.DataFrame(
+            {"field_d1_str": ["Test D"], "link_hub_d_hub_b": [sat_b.hub_entity]}
+        )
+        repository.create_by_data_frame(input_data)
+        test_data = repository.receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertEqual(test_data[0].field_d1_str, "Test D")
+        self.assertEqual(json.loads(test_data[0].field_b1_str), ["Test B"])
 
 
 class TestMontrekCreateObjectDataFrame(TestCase):
@@ -1287,6 +1320,140 @@ class TestDeleteObject(TestCase):
         self.assertEqual(len(repository.receive()), 1)
 
 
+class TestreceiveLinkedHubIds(TestCase):
+    def test_get_linked_hub_without_sat(self):
+        # Consider a scenario, where two hubs are linked, but one has no
+        # entry in the satellite
+        sat_b = me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_d = me_factories.HubDFactory()
+        sat_b.hub_entity.link_hub_b_hub_d.add(hub_d)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        # A hub reached via add_linked_satellites_field_annotations will be empty
+        self.assertIsNone(test_data.first().hub_d_id)
+        self.assertEqual(test_data.first().hub_d_direct_id, json.dumps([hub_d.pk]))
+
+    def test_get_linked_hub_without_sat__single_entry(self):
+        sat_b = me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_a = me_factories.HubAFactory()
+        sat_b.hub_entity.link_hub_b_hub_a.add(hub_a)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertIsNone(test_data.first().hub_a_id)
+        self.assertEqual(test_data.first().hub_a_direct_id, hub_a.pk)
+
+    def test_get_linked_hub_without_sat__aggregation(self):
+        sat_b = me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_d_1 = me_factories.HubDFactory()
+        hub_d_2 = me_factories.HubDFactory()
+        sat_b.hub_entity.link_hub_b_hub_d.add(hub_d_1)
+        sat_b.hub_entity.link_hub_b_hub_d.add(hub_d_2)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertIsNone(test_data.first().hub_d_id)
+        direct_ids = json.loads(test_data.first().hub_d_direct_id)
+        self.assertCountEqual(direct_ids, [hub_d_1.pk, hub_d_2.pk])
+
+    def test_get_linked_hub_without_sat__parent_links(self):
+        sat_b = me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_d = me_factories.HubDFactory()
+        sat_b.hub_entity.link_hub_b_hub_d.add(hub_d)
+        hub_cs = me_factories.HubCFactory.create_batch(3)
+        for hub_c in hub_cs:
+            hub_d.link_hub_d_hub_c.add(hub_c)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertIsNone(test_data.first().hub_c_id)
+        direct_ids = json.loads(test_data.first().hub_c_direct_id)
+        self.assertCountEqual(direct_ids, [hub_c.pk for hub_c in hub_cs])
+
+    def test_no_link__returns_null(self):
+        me_factories.SatB1Factory.create(field_b1_str="Test")
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertIsNone(test_data.first().hub_d_direct_id)
+        self.assertIsNone(test_data.first().hub_a_direct_id)
+        self.assertIsNone(test_data.first().hub_c_direct_id)
+
+    def test_expired_link__is_excluded(self):
+        sat_b = me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_d = me_factories.HubDFactory()
+        me_factories.LinkHubBHubDFactory(
+            hub_in=sat_b.hub_entity,
+            hub_out=hub_d,
+            state_date_end=montrek_time(2020, 1, 1),
+        )
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertIsNone(test_data.first().hub_d_direct_id)
+
+    def test_multiple_hub_bs__results_are_isolated(self):
+        sat_b1 = me_factories.SatB1Factory.create(field_b1_str="B1")
+        sat_b2 = me_factories.SatB1Factory.create(field_b1_str="B2")
+        hub_d1 = me_factories.HubDFactory()
+        hub_d2 = me_factories.HubDFactory()
+        sat_b1.hub_entity.link_hub_b_hub_d.add(hub_d1)
+        sat_b2.hub_entity.link_hub_b_hub_d.add(hub_d2)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 2)
+        b1_row = test_data.get(field_b1_str="B1")
+        b2_row = test_data.get(field_b1_str="B2")
+        self.assertEqual(b1_row.hub_d_direct_id, json.dumps([hub_d1.pk]))
+        self.assertEqual(b2_row.hub_d_direct_id, json.dumps([hub_d2.pk]))
+
+    def test_parent_link__multiple_hub_ds_aggregated(self):
+        # HubB → HubD1 → HubC1, HubB → HubD2 → HubC2: both HubC IDs aggregated
+        sat_b = me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_d1 = me_factories.HubDFactory()
+        hub_d2 = me_factories.HubDFactory()
+        sat_b.hub_entity.link_hub_b_hub_d.add(hub_d1)
+        sat_b.hub_entity.link_hub_b_hub_d.add(hub_d2)
+        hub_c1 = me_factories.HubCFactory()
+        hub_c2 = me_factories.HubCFactory()
+        hub_d1.link_hub_d_hub_c.add(hub_c1)
+        hub_d2.link_hub_d_hub_c.add(hub_c2)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        direct_ids = json.loads(test_data.first().hub_c_direct_id)
+        self.assertCountEqual(direct_ids, [hub_c1.pk, hub_c2.pk])
+
+    def test_parent_link__expired_parent_link__returns_null(self):
+        # Expired B→D link means HubC reached via that HubD must not appear
+        sat_b = me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_d = me_factories.HubDFactory()
+        me_factories.LinkHubBHubDFactory(
+            hub_in=sat_b.hub_entity,
+            hub_out=hub_d,
+            state_date_end=montrek_time(2020, 1, 1),
+        )
+        hub_c = me_factories.HubCFactory()
+        hub_d.link_hub_d_hub_c.add(hub_c)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertIsNone(test_data.first().hub_c_direct_id)
+
+    def test_parent_link__unrelated_hub_d_does_not_bleed(self):
+        # HubD → HubC exists, but this HubB has no link to that HubD
+        me_factories.SatB1Factory.create(field_b1_str="Test")
+        hub_d = me_factories.HubDFactory()
+        hub_c = me_factories.HubCFactory()
+        hub_d.link_hub_d_hub_c.add(hub_c)
+        test_data = HubBRepositoryDirectLinkHub({}).receive()
+        self.assertEqual(test_data.count(), 1)
+        self.assertIsNone(test_data.first().hub_c_direct_id)
+
+    def test_reversed_link__one_to_many(self):
+        sat_c = me_factories.SatC1Factory.create(field_c1_str="Test")
+        hub_as = me_factories.HubAFactory.create_batch(3)
+        for hub_a in hub_as:
+            hub_a.link_hub_a_hub_c.add(sat_c.hub_entity)
+
+        test_data = HubCRepositoryDirectLinkHub({}).receive()
+        self.assertIsNone(test_data.first().hub_a_id)
+        direct_ids = json.loads(test_data.first().hub_a_direct_id)
+        self.assertCountEqual(direct_ids, [hub_a.pk for hub_a in hub_as])
+
+
 class TestMontrekRepositoryLinks(TestCase):
     def setUp(self):
         self.huba1 = me_factories.HubAFactory()
@@ -1359,24 +1526,24 @@ class TestMontrekRepositoryLinks(TestCase):
         repository.reference_date = montrek_time(2023, 7, 8)
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 2)
-        self.assertEqual(queryset[0].field_a1_int, "5")
+        self.assertEqual(json.loads(queryset[0].field_a1_int), [5])
         self.assertEqual(queryset[1].field_a1_int, None)
         repository.reference_date = montrek_time(2023, 7, 15)
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 2)
-        self.assertEqual(queryset[0].field_a1_int, "5")
+        self.assertEqual(json.loads(queryset[0].field_a1_int), [5])
         self.assertEqual(queryset[1].field_a1_int, None)
 
     def test_link_reversed__session_data(self):
         repository = HubCRepository2({"reference_date": "2023-07-08"})
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 2)
-        self.assertEqual(queryset[0].field_a1_int, "5")
+        self.assertEqual(json.loads(queryset[0].field_a1_int), [5])
         self.assertEqual(queryset[1].field_a1_int, None)
         repository = HubCRepository2({"reference_date": ["2023-07-15"]})
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 2)
-        self.assertEqual(queryset[0].field_a1_int, "5")
+        self.assertEqual(json.loads(queryset[0].field_a1_int), [5])
         self.assertEqual(queryset[1].field_a1_int, None)
 
     def test_link_reversed_ts(self):
@@ -1387,7 +1554,7 @@ class TestMontrekRepositoryLinks(TestCase):
         sat_tsc2.hub_value_date.hub.link_hub_c_hub_d.add(d_hub)
         queryset = HubDRepositoryTSReverseLink({}).receive()
         self.assertEqual(queryset.count(), 1)
-        self.assertEqual(queryset[0].field_tsc2_float, "2.5")
+        self.assertEqual(json.loads(queryset[0].field_tsc2_float), [2.5])
 
     def test_link_with_parent_links(self):
         hubc = me_factories.HubCFactory()
@@ -1398,7 +1565,9 @@ class TestMontrekRepositoryLinks(TestCase):
         repository = HubARepository3()
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 2)
-        self.assertEqual(queryset[0].field_d1_str, "Test")
+        self.assertEqual(
+            json.loads(queryset.get(field_d1_str__isnull=False).field_d1_str), ["Test"]
+        )
 
     def test_link_with_parent_links__reference_date_filter_on_parent_link_class(self):
         # Initial setup
@@ -1415,10 +1584,14 @@ class TestMontrekRepositoryLinks(TestCase):
         user = MontrekUserFactory()
         session_data = {"user_id": user.id}
         repository = HubARepository3(session_data)
-        repository.create_by_dict({"field_a1_str": "Test", "link_hub_a_hub_c": hubc2})
+        new_hub = repository.create_by_dict(
+            {"field_a1_str": "Test", "link_hub_a_hub_c": hubc2}
+        )
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 2)
-        self.assertEqual(queryset[0].field_d1_str, "Test2")
+        self.assertEqual(
+            json.loads(queryset.get(hub_entity_id=new_hub.pk).field_d1_str), ["Test2"]
+        )
 
     def test_link_reversed_with_parent_links(self):
         satd = me_factories.SatD1Factory()
@@ -1433,7 +1606,9 @@ class TestMontrekRepositoryLinks(TestCase):
         repository = HubDRepositoryReversedParentLink()
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 1)
-        self.assertEqual(queryset.first().field_a1_str, "Test;Extra Test")
+        self.assertCountEqual(
+            json.loads(queryset.first().field_a1_str), ["Test", "Extra Test"]
+        )
 
     def test_link_reversed_with_parent_links__many_to_many(self):
         satd = me_factories.SatD1Factory()
@@ -1441,7 +1616,7 @@ class TestMontrekRepositoryLinks(TestCase):
         repository = HubDRepositoryReversedParentLink()
         queryset = repository.receive()
         self.assertEqual(queryset.count(), 1)
-        self.assertEqual(queryset.first().field_a1_str, "Test")
+        self.assertEqual(json.loads(queryset.first().field_a1_str), ["Test"])
 
     def test_link_with_reversed_parent(self):
         hub_c = me_factories.HubCFactory()
@@ -1453,8 +1628,8 @@ class TestMontrekRepositoryLinks(TestCase):
         )
         repository = HubCRepositoryReversedParents()
         c_object = repository.receive().get(hub__pk=hub_c.pk)
-        self.assertEqual(c_object.field_a1_str, "A1Test")
-        self.assertEqual(c_object.field_b1_str, "B1Test")
+        self.assertEqual(json.loads(c_object.field_a1_str), ["A1Test"])
+        self.assertEqual(json.loads(c_object.field_b1_str), ["B1Test"])
 
     def test_link_with_reversed_parent__many_to_many__raise_no_error(self):
         hub_c = me_factories.HubCFactory()
@@ -1470,7 +1645,7 @@ class TestMontrekRepositoryLinks(TestCase):
         )
         repository = HubCRepositoryReversedParents()
         test_element = repository.receive().get(hub__pk=hub_c.pk)
-        test_field = test_element.field_b1_str.split("##")
+        test_field = json.loads(test_element.field_b1_str)
         self.assertEqual(len(test_field), 2)
         self.assertIn("B1Test1", test_field)
         self.assertIn("B1Test2", test_field)
@@ -1490,7 +1665,75 @@ class TestMontrekRepositoryLinks(TestCase):
         repo = HubCRepositoryWithManyToManyParents({})
         test_query = repo.receive()
         test_element = test_query.get(hub_entity_id=hub_c.pk)
-        self.assertEqual(test_element.field_e1_str, "Test1;Test2")
+        self.assertCountEqual(json.loads(test_element.field_e1_str), ["Test1", "Test2"])
+
+    def test_link_with_value_date_scope_path_restricts_to_matching_value_date(self):
+        """Plain hub-level links (LinkHubCHubD, LinkHubDHubE) carry no value_date
+        of their own, so without value_date_scope_path the traversal would match
+        every HubD ever linked to HubC, across all value dates. With it set, each
+        CHubValueDate row should only pick up the SatE1 value reachable through
+        the HubD that was linked for that exact value date."""
+        hub_c = me_factories.HubCFactory()
+        value_dates = ["2024-01-01", "2025-01-01", "2026-01-01"]
+        expected = {}
+        for value_date in value_dates:
+            me_factories.CHubValueDateFactory(hub=hub_c, value_date=value_date)
+            sat_e1 = me_factories.SatE1Factory(field_e1_str=f"E-{value_date}")
+            hub_d = me_factories.HubDFactory(hub_e=sat_e1.hub_entity)
+            me_factories.LinkHubCHubDFactory(hub_in=hub_c, hub_out=hub_d)
+            me_factories.DHubValueDateFactory(hub=hub_d, value_date=value_date)
+            expected[value_date] = sat_e1.field_e1_str
+
+        repo = HubCRepositoryWithValueDateScopedLink({})
+        results = repo.receive().filter(hub_entity_id=hub_c.pk)
+        self.assertEqual(results.count(), len(value_dates))
+        for row in results:
+            self.assertEqual(
+                json.loads(row.field_e1_str), [expected[str(row.value_date)]]
+            )
+
+    def test_link_with_paired_json_annotation_keeps_fields_paired_per_row(self):
+        """Independently JSON_AGG-ing the TS satellite field and the field from
+        the secondary linked hub gives no guarantee that the database returns
+        both arrays in the same row order, making positional zip() pairing on
+        the consuming side unreliable. The combined annotation instead builds
+        a {field: ..., extra_key: ...} JSON object per linked HubValueDate row
+        at the SQL level, so pairing is guaranteed by construction."""
+        hub_c = me_factories.HubCFactory()
+        value_dates = ["2024-01-01", "2025-01-01", "2026-01-01"]
+        expected: dict[str, list[dict[str, object]]] = {}
+        for value_date in value_dates:
+            me_factories.CHubValueDateFactory(hub=hub_c, value_date=value_date)
+
+            expected[value_date] = []
+            for suffix in ("1", "2") if value_date == value_dates[0] else ("1",):
+                sat_e1 = me_factories.SatE1Factory(
+                    field_e1_str=f"E-{value_date}-{suffix}"
+                )
+                hub_d = me_factories.HubDFactory(hub_e=sat_e1.hub_entity)
+                me_factories.LinkHubCHubDFactory(hub_in=hub_c, hub_out=hub_d)
+                d_hvd = me_factories.DHubValueDateFactory(
+                    hub=hub_d, value_date=value_date
+                )
+                sat_tsd2 = me_factories.SatTSD2Factory(
+                    hub_value_date=d_hvd, field_tsd2_float=float(value_date[:4])
+                )
+                expected[value_date].append(
+                    {
+                        "field_tsd2_float": sat_tsd2.field_tsd2_float,
+                        "field_e1_str": sat_e1.field_e1_str,
+                    }
+                )
+
+        repo = HubCRepositoryWithPairedJsonAnnotation({})
+        results = repo.receive().filter(hub_entity_id=hub_c.pk)
+        self.assertEqual(results.count(), len(value_dates))
+        for row in results:
+            details = json.loads(row.tsd2_with_e1_details)
+            self.assertEqual(
+                sorted(details, key=lambda d: d["field_e1_str"]),
+                sorted(expected[str(row.value_date)], key=lambda d: d["field_e1_str"]),
+            )
 
     def test_link_with_many_to_one_parents(self):
         sat_b1 = me_factories.SatB1Factory(field_b1_str="Test1")
@@ -1501,7 +1744,7 @@ class TestMontrekRepositoryLinks(TestCase):
         repo = HubCRepositoryWithManyToOneParents({})
         test_query = repo.receive()
         test_element = test_query.get(hub_entity_id=hub_c.pk)
-        self.assertEqual(test_element.field_b1_str, "Test1;Test2")
+        self.assertCountEqual(json.loads(test_element.field_b1_str), ["Test1", "Test2"])
 
 
 class TestLinkOneToOneUpates(TestCase):
@@ -2229,13 +2472,16 @@ class TestTSRepoLatestTS(TestCase):
         self.assertEqual(test_query.count(), 3)
         qs1 = test_query.get(field_c1_str="Hallo")
         self.assertEqual(qs1.field_tsc2_float, 3.0)
+        self.assertEqual(qs1.prev_field_tsc2_float, 1.0)
         self.assertEqual(qs1.value_date, montrek_time(2024, 11, 16).date())
         qs2 = test_query.get(field_c1_str="Bonjour")
         self.assertEqual(qs2.field_tsc2_float, 4.0)
+        self.assertEqual(qs2.prev_field_tsc2_float, 2.0)
         self.assertEqual(qs2.value_date, montrek_time(2024, 11, 16).date())
         qs3 = test_query.get(field_c1_str="Hola")
-        self.assertEqual(qs3.field_tsc2_float, None)
-        self.assertEqual(qs3.value_date, None)
+        self.assertIsNone(qs3.field_tsc2_float)
+        self.assertIsNone(qs3.prev_field_tsc2_float)
+        self.assertIsNone(qs3.value_date)
 
     def test_ts_sum_repo(self):
         hub_vd1 = me_factories.CHubValueDateFactory.create(
@@ -2289,7 +2535,7 @@ class TestStaticAggFuncs(TestCase):
         repo = HubCRepositoryMean()
         test_query = repo.receive()
         self.assertEqual(test_query.count(), 1)
-        self.assertEqual(test_query[0].field_d1_int, 3)
+        self.assertEqual(test_query[0].field_d1_int, 3.5)
         self.assertAlmostEqual(test_query[0].field_a2_float, 2.75, delta=0.01)
 
     def test_count(self):
@@ -2299,6 +2545,73 @@ class TestStaticAggFuncs(TestCase):
         self.assertEqual(test_query[0].field_d1_int, 2)
         self.assertEqual(test_query[0].a2_counter, 2)
         self.assertEqual(test_query[0].a2_counter_w_filter, 1)
+
+
+class TestTSAggFuncs(TestCase):
+    def setUp(self) -> None:
+        self.test_date_1 = "2026-04-20"
+        self.test_date_2 = "2026-04-21"
+        sat_d1 = me_factories.SatD1Factory()
+
+        self.hvd_1 = me_factories.DHubValueDateFactory(
+            hub=sat_d1.hub_entity, value_date=self.test_date_1
+        )
+        self.hvd_2 = me_factories.DHubValueDateFactory(
+            hub=sat_d1.hub_entity, value_date=self.test_date_2
+        )
+        tsc2_sats = (
+            me_factories.SatTSC2Factory(
+                field_tsc2_float=2.5, value_date=self.test_date_1
+            ),
+            me_factories.SatTSC2Factory(
+                field_tsc2_float=3.5, value_date=self.test_date_1
+            ),
+            me_factories.SatTSC2Factory(
+                field_tsc2_float=4.5, value_date=self.test_date_2
+            ),
+        )
+        for sat in tsc2_sats:
+            sat.hub_value_date.hub.link_hub_c_hub_d.add(sat_d1.hub_entity)
+
+    def test_sum(self):
+        repo = HubDTSLinkAggRepositorySum()
+        test_query = repo.receive()
+        first_entry = test_query.get(pk=self.hvd_1.pk)
+        second_entry = test_query.get(pk=self.hvd_2.pk)
+        self.assertEqual(first_entry.field_tsc2_float, 6)
+        self.assertEqual(second_entry.field_tsc2_float, 4.5)
+
+    def test_link_hub_value_date_filter_decouples_linked_value_date_from_outer_row(
+        self,
+    ):
+        """With latest_ts=True, the outer row is the HubD HVD at test_date_2.
+        The default-dated annotation aggregates linked SatTSC2 values at the
+        same value date as the outer row (test_date_2: just 4.5), while
+        link_hub_value_date_filter pins the second annotation to test_date_1
+        (2.5 and 3.5, mean 3.0) regardless of the outer row's value date."""
+        repo = HubDTSLinkAggRepositoryWithLinkHubValueDateFilter(
+            {"prev_value_date": self.test_date_1}
+        )
+        test_query = repo.receive()
+        self.assertEqual(test_query.count(), 1)
+        entry = test_query.get()
+        self.assertEqual(entry.field_tsc2_float, 4.5)
+        self.assertAlmostEqual(entry.prev_field_tsc2_float, 3.0)
+
+    def test_link_hub_value_date_filter_with_sum_pins_aggregation_to_explicit_date(
+        self,
+    ):
+        """agg_func="sum" combined with link_hub_value_date_filter sums the
+        linked SatTSC2 values across all linked HubC hubs at the pinned
+        value date (test_date_1: 2.5 + 3.5 = 6.0), excluding the linked
+        hub's value at test_date_2 (4.5), regardless of the outer row's own
+        value date."""
+        repo = HubDTSLinkAggRepositoryWithLinkHubValueDateFilter(
+            {"prev_value_date": self.test_date_1}
+        )
+        test_query = repo.receive()
+        entry = test_query.get()
+        self.assertAlmostEqual(entry.prev_field_tsc2_float_sum, 6.0)
 
 
 class TestStaticAggFuncsAll(TestCase):
@@ -2563,15 +2876,17 @@ class TestMontrekManyToManyRelations(TestCase):
         repository_d = HubDRepository()
         satd_queryset = repository_d.receive()
         self.assertEqual(satd_queryset.count(), 2)
-        self.assertEqual(
-            satd_queryset[0].hub_b_id,
-            f"{self.satb1.hub_entity_id},{self.satb2.hub_entity_id}",
+        self.assertCountEqual(
+            json.loads(satd_queryset[0].hub_b_id),
+            [self.satb1.hub_entity_id, self.satb2.hub_entity_id],
+        )
+        self.assertCountEqual(
+            json.loads(satd_queryset[0].field_b1_str),
+            [self.satb1.field_b1_str, self.satb2.field_b1_str],
         )
         self.assertEqual(
-            satd_queryset[0].field_b1_str,
-            f"{self.satb1.field_b1_str},{self.satb2.field_b1_str}",
+            json.loads(satd_queryset[1].field_b1_str), [self.satb1.field_b1_str]
         )
-        self.assertEqual(satd_queryset[1].field_b1_str, self.satb1.field_b1_str)
 
     def test_add_new_many_to_many_relation(self):
         input_data = {
@@ -2940,7 +3255,7 @@ class TestRepositoryQueryConcept(TestCase):
         query = repo.receive()
         self.assertEqual(query.count(), 1)
         self.assertEqual(query.first().field_c1_str, c_sat1.field_c1_str)
-        self.assertEqual(query.first().field_d1_str, d_sat1.field_d1_str)
+        self.assertEqual(json.loads(query.first().field_d1_str), [d_sat1.field_d1_str])
 
     def test_ts_satellite_concept__linked_ts_sat(self):
         value_date_list = me_factories.ValueDateListFactory()
@@ -3021,11 +3336,12 @@ class TestRepositoryQueryConcept(TestCase):
         query = repo.receive()
         self.assertEqual(query.count(), 2)
         self.assertEqual(query.first().field_c1_str, c_sat1.field_c1_str)
-        self.assertEqual(
-            query.first().field_d1_str, f"{d_sat1.field_d1_str},{d_sat2.field_d1_str}"
+        self.assertCountEqual(
+            json.loads(query.first().field_d1_str),
+            [d_sat1.field_d1_str, d_sat2.field_d1_str],
         )
         self.assertEqual(query.last().field_c1_str, c_sat2.field_c1_str)
-        self.assertEqual(query.last().field_d1_str, d_sat1.field_d1_str)
+        self.assertEqual(json.loads(query.last().field_d1_str), [d_sat1.field_d1_str])
 
     def test_ts_satellite_concept__multiple_ts_links_aggregated_to_one(self):
         c_sat1 = me_factories.SatC1Factory()
@@ -3073,8 +3389,8 @@ class TestCommonFields(TestCase):
         test_obj = query.last()
         self.assertEqual(test_obj.comment_tsc2, "First Comment")
         self.assertEqual(test_obj.comment_c1, "Second Comment")
-        self.assertEqual(test_obj.comment_tsd2, "Third Comment")
-        self.assertEqual(test_obj.comment_d1, "Fourth Comment")
+        self.assertEqual(json.loads(test_obj.comment_tsd2), ["Third Comment"])
+        self.assertEqual(json.loads(test_obj.comment_d1), ["Fourth Comment"])
         self.assertEqual(test_obj.comment, "")
 
 
@@ -3617,7 +3933,7 @@ class TestCrossSatelliteFilter(TestCase):
         repo = HubBRepositoryWithCrossSatFilter()
         queryset = repo.receive().filter(hub=satb.hub_entity)
         self.assertEqual(queryset.count(), 1)
-        self.assertEqual(queryset[0].field_d1_str, "D-match")
+        self.assertEqual(json.loads(queryset[0].field_d1_str), ["D-match"])
 
     def test_non_matching_hub_d_returns_none(self):
         """HubD has a HubC link but SatC1.field_c1_str does not match."""
@@ -3649,7 +3965,7 @@ class TestCrossSatelliteFilter(TestCase):
         repo = HubBRepositoryWithCrossSatFilter()
         queryset = repo.receive().order_by("field_b1_str")
         self.assertEqual(queryset.count(), 2)
-        self.assertEqual(queryset[0].field_d1_str, "D1-match")
+        self.assertEqual(json.loads(queryset[0].field_d1_str), ["D1-match"])
         self.assertIsNone(queryset[1].field_d1_str)
 
     def test_cross_satellite_filter_with_count_agg(self):
@@ -3787,7 +4103,7 @@ class TestCrossSatelliteFilter(TestCase):
         repo = HubBRepositoryWithTSCrossSatFilter()
         queryset = repo.receive().filter(hub=satb1.hub_entity)
         self.assertEqual(queryset.count(), 1)
-        self.assertEqual(queryset[0].field_d1_str, "D1-ts-match")
+        self.assertEqual(json.loads(queryset[0].field_d1_str), ["D1-ts-match"])
 
     def test_cross_satellite_filter_with_ts_cross_satellite_not_matching(self):
         """Cross-satellite is a timeseries satellite — non-matching case returns None."""
@@ -3936,3 +4252,368 @@ class TestFilterByLinkedHub(TestCase):
         )
         hub_ids = list(qs.values_list("hub_id", flat=True))
         self.assertNotIn(self.satd2.hub_entity_id, hub_ids)
+
+
+class TestTSSatelliteLinkSatelliteFilterCount(TestCase):
+    """
+    Regression: link_satellite_filter on a TS satellite with agg_func="count" must
+    return 0 when all satellites fail the filter — not the total unfiltered count.
+
+    Root cause: SQL COUNT() returns 0 (not NULL) for empty sets, so the outer COUNT
+    in _link_hubs_and_get_ts_subquery was treating those zeros as valid (non-NULL)
+    entries and counting them.  The fix applies NullIf(inner_subquery, 0) to convert
+    zero inner counts to NULL so the outer COUNT skips them.
+
+    Setup: DHubValueDate (outer) ← LinkHubCHubD (M2M) ← HubC ← CHubValueDate ← SatTSC2
+    """
+
+    def setUp(self):
+        self.reference_date = montrek_time(2023, 6, 25)
+        shared_vdl = ValueDateListFactory()
+
+        hub_d = me_factories.HubDFactory()
+        self.outer_hvd = me_factories.DHubValueDateFactory(
+            hub=hub_d, value_date_list=shared_vdl
+        )
+
+        hub_c_1 = me_factories.HubCFactory()
+        inner_hvd_1 = me_factories.CHubValueDateFactory(
+            hub=hub_c_1, value_date_list=shared_vdl
+        )
+        me_factories.LinkHubCHubDFactory(hub_in=hub_c_1, hub_out=hub_d)
+        self.sat_1 = me_factories.SatTSC2Factory(
+            hub_value_date=inner_hvd_1, field_tsc2_float=0.0
+        )
+
+        hub_c_2 = me_factories.HubCFactory()
+        inner_hvd_2 = me_factories.CHubValueDateFactory(
+            hub=hub_c_2, value_date_list=shared_vdl
+        )
+        me_factories.LinkHubCHubDFactory(hub_in=hub_c_2, hub_out=hub_d)
+        self.sat_2 = me_factories.SatTSC2Factory(
+            hub_value_date=inner_hvd_2, field_tsc2_float=0.0
+        )
+
+    def _annotate(self, link_satellite_filter=None):
+        builder = ReverseLinkedSatelliteSubqueryBuilder(
+            satellite_class=me_models.SatTSC2,
+            field="hub_value_date_id",
+            link_class=me_models.LinkHubCHubD,
+            agg_func="count",
+            link_satellite_filter=link_satellite_filter,
+        )
+        return me_models.DHubValueDate.objects.annotate(
+            linked_count=builder.build(self.reference_date)
+        ).get(pk=self.outer_hvd.pk)
+
+    def test_count_without_filter_returns_total(self):
+        self.assertEqual(self._annotate().linked_count, 2)
+
+    def test_count_with_filter_matching_none_returns_zero(self):
+        # field_tsc2_float=0.0 for both → __gt=0 excludes everything → must be 0, not 2.
+        # Before the fix this returned 2 because COUNT(0, 0) = 2.
+        result = self._annotate(link_satellite_filter={"field_tsc2_float__gt": 0})
+        self.assertEqual(result.linked_count, 0)
+
+    def test_count_with_filter_matching_one_returns_one(self):
+        self.sat_1.field_tsc2_float = 1.0
+        self.sat_1.save()
+        result = self._annotate(link_satellite_filter={"field_tsc2_float__gt": 0})
+        self.assertEqual(result.linked_count, 1)
+
+    def test_count_with_filter_matching_all_returns_total(self):
+        self.sat_1.field_tsc2_float = 1.0
+        self.sat_1.save()
+        self.sat_2.field_tsc2_float = 1.0
+        self.sat_2.save()
+        result = self._annotate(link_satellite_filter={"field_tsc2_float__gt": 0})
+        self.assertEqual(result.linked_count, 2)
+
+
+class TestHubSatelliteFilter(TestCase):
+    """Tests for hub_satellite_filter on add_satellite_fields_annotations.
+
+    hub_satellite_filter switches the TS satellite lookup from per-HVD to
+    hub-level, returning the latest satellite matching the filter criteria
+    across the hub's full history.  Requires latest_ts=True on the repository.
+    """
+
+    def setUp(self):
+        # hub_c_1: three time-series entries at ascending dates
+        sat_jan = me_factories.SatTSC2Factory.create(
+            value_date="2026-01-01", field_tsc2_float=1.0
+        )
+        self.hub_c_1 = sat_jan.hub_value_date.hub
+        hvd_feb = me_factories.CHubValueDateFactory.create(
+            hub=self.hub_c_1,
+            value_date_list=ValueDateListFactory.create(value_date="2026-02-01"),
+        )
+        me_factories.SatTSC2Factory.create(hub_value_date=hvd_feb, field_tsc2_float=2.0)
+        hvd_mar = me_factories.CHubValueDateFactory.create(
+            hub=self.hub_c_1,
+            value_date_list=ValueDateListFactory.create(value_date="2026-03-01"),
+        )
+        me_factories.SatTSC2Factory.create(hub_value_date=hvd_mar, field_tsc2_float=3.0)
+
+        # hub_c_2: single entry — no previous value exists
+        sat_only = me_factories.SatTSC2Factory.create(
+            value_date="2026-01-01", field_tsc2_float=5.0
+        )
+        self.hub_c_2 = sat_only.hub_value_date.hub
+
+    # --- previous-value filter ---
+
+    def test_prev_value_is_the_immediately_preceding_entry(self):
+        repo = HubCRepositoryLastTS()
+        qs = repo.receive().get(hub_entity_id=self.hub_c_1.pk)
+        self.assertEqual(qs.field_tsc2_float, 3.0)
+        self.assertEqual(qs.prev_field_tsc2_float, 2.0)
+
+    def test_prev_value_is_none_when_only_one_entry_exists(self):
+        repo = HubCRepositoryLastTS()
+        qs = repo.receive().get(hub_entity_id=self.hub_c_2.pk)
+        self.assertEqual(qs.field_tsc2_float, 5.0)
+        self.assertIsNone(qs.prev_field_tsc2_float)
+
+    def test_prev_value_is_not_the_oldest_but_the_second_latest(self):
+        # Verifies that ORDER BY date DESC LIMIT 1 picks the entry just before
+        # the latest, not the oldest one in the history.
+        repo = HubCRepositoryLastTS()
+        qs = repo.receive().get(hub_entity_id=self.hub_c_1.pk)
+        self.assertNotEqual(qs.prev_field_tsc2_float, 1.0)
+        self.assertEqual(qs.prev_field_tsc2_float, 2.0)
+
+    # --- property filter ---
+
+    def test_property_filter_returns_latest_satellite_matching_condition(self):
+        # hub_c_1 has values [1.0, 2.0, 3.0]; filter __gte=2.0 → latest match is 3.0
+        repo = HubCRepositoryPropertyFilter()
+        qs = repo.receive().get(hub_entity_id=self.hub_c_1.pk)
+        self.assertEqual(qs.field_tsc2_float, 3.0)
+
+    def test_property_filter_skips_non_matching_satellites(self):
+        # hub_c_2 has only value 5.0 which satisfies __gte=2.0
+        repo = HubCRepositoryPropertyFilter()
+        qs = repo.receive().get(hub_entity_id=self.hub_c_2.pk)
+        self.assertEqual(qs.field_tsc2_float, 5.0)
+
+    def test_property_filter_returns_none_when_no_satellite_matches(self):
+        sat = me_factories.SatTSC2Factory.create(
+            value_date="2026-01-01", field_tsc2_float=0.5
+        )
+        hub_no_match = sat.hub_value_date.hub
+        repo = HubCRepositoryPropertyFilter()
+        qs = repo.receive().get(hub_entity_id=hub_no_match.pk)
+        self.assertIsNone(qs.field_tsc2_float)
+
+    # --- warning ---
+
+    def test_warning_emitted_when_hub_satellite_filter_used_with_latest_ts_false(self):
+        class _MisconfiguredRepo(MontrekRepository):
+            hub_class = me_models.HubC
+            latest_ts = False
+
+            def set_annotations(self):
+                self.add_satellite_fields_annotations(
+                    me_models.SatTSC2,
+                    ["field_tsc2_float"],
+                    hub_satellite_filter={"field_tsc2_float__gte": 2.0},
+                )
+
+        with self.assertWarns(UserWarning) as cm:
+            _MisconfiguredRepo({})
+        self.assertIn("hub_satellite_filter", str(cm.warning))
+
+
+class TestQuerysetForwardedToSubqueryBuilder(TestCase):
+    """
+    Regression test for forwarding the intermediate queryset to SubqueryBuilder.build().
+
+    ``_QuerysetAwareSubqueryBuilder`` performs a Python-side computation that
+    requires the intermediate queryset (carrying ``field_projections``
+    annotations). Without forwarding it returns ``None`` for every row.
+    """
+
+    def setUp(self):
+        me_factories.SatA1Factory(field_a1_int=5)
+        me_factories.SatA1Factory(field_a1_int=10)
+
+    def test_queryset_forwarded_to_subquery_builder(self):
+        qs = HubAQuerysetAwareRepository().receive().order_by("field_a1_int")
+        self.assertEqual(qs[0].field_a1_int_doubled, 10)
+        self.assertEqual(qs[1].field_a1_int_doubled, 20)
+
+
+class TestScalarLinkedTSSatelliteAlias(TestCase):
+    """Tests for the TS alias optimization path (_build_ts_scalar_alias).
+
+    When annotating multiple fields from a scalar linked timeseries satellite
+    (one satellite row per hub row), the Annotator shares a single alias
+    subquery that resolves the satellite pk at the matching value_date_list,
+    and each field is then resolved via a cheap pk-lookup projection.
+
+    The four cases cover:
+    - correct field values when value_dates match
+    - isolation: only the satellite at the matching value_date is used
+    - expired satellite (state_date_end before reference_date) → null
+    - no link → null
+    """
+
+    def test_correct_fields_returned_for_matching_value_date(self):
+        """Both projected fields from the linked TS satellite are returned
+        correctly, confirming that the shared alias resolves the right pk."""
+        sat_tsc3 = me_factories.SatTSC3Factory(
+            value_date="2024-01-15", field_tsc3_int=42, field_tsc3_str="hello"
+        )
+        hvd_a = me_factories.AHubValueDateFactory(value_date="2024-01-15")
+        me_factories.LinkHubAHubCFactory(
+            hub_in=hvd_a.hub, hub_out=sat_tsc3.hub_value_date.hub
+        )
+
+        qs = HubATSLinkedRepository().receive()
+        self.assertEqual(qs.count(), 1)
+        obj = qs.get()
+        self.assertEqual(obj.field_tsc3_int, 42)
+        self.assertEqual(obj.field_tsc3_str, "hello")
+
+    def test_value_date_isolation(self):
+        """A HubA row at value_date A retrieves the satellite for date A only —
+        not the satellite at date B — even when both HubA rows are linked to the
+        same HubC that has satellites at both dates."""
+        hub_c = me_factories.HubCFactory()
+
+        # January CHubValueDate + SatTSC3
+        hvd_c_jan = me_factories.CHubValueDateFactory.create(
+            hub=hub_c,
+            value_date_list=ValueDateListFactory.create(value_date="2024-01-15"),
+        )
+        me_factories.SatTSC3Factory.create(hub_value_date=hvd_c_jan, field_tsc3_int=10)
+
+        # February CHubValueDate + SatTSC3
+        hvd_c_feb = me_factories.CHubValueDateFactory.create(
+            hub=hub_c,
+            value_date_list=ValueDateListFactory.create(value_date="2024-02-01"),
+        )
+        me_factories.SatTSC3Factory.create(hub_value_date=hvd_c_feb, field_tsc3_int=20)
+
+        # HubA linked for January value date
+        hvd_a_jan = me_factories.AHubValueDateFactory.create(value_date="2024-01-15")
+        me_factories.LinkHubAHubCFactory(hub_in=hvd_a_jan.hub, hub_out=hub_c)
+
+        # HubA linked for February value date
+        hvd_a_feb = me_factories.AHubValueDateFactory.create(value_date="2024-02-01")
+        me_factories.LinkHubAHubCFactory(hub_in=hvd_a_feb.hub, hub_out=hub_c)
+
+        qs = HubATSLinkedRepository().receive().order_by("value_date")
+        self.assertEqual(qs.count(), 2)
+        self.assertEqual(qs[0].field_tsc3_int, 10)  # Jan row → Jan satellite
+        self.assertEqual(qs[1].field_tsc3_int, 20)  # Feb row → Feb satellite
+
+    def test_expired_satellite_returns_null(self):
+        """A satellite whose state_date_end is before the reference_date is not
+        matched by the alias subquery (state validity filter fails), so both
+        projected fields are null."""
+        ref_date = montrek_time(2024, 6, 1)
+        sat_tsc3 = me_factories.SatTSC3Factory(
+            value_date="2024-01-15",
+            field_tsc3_int=42,
+            field_tsc3_str="hello",
+            state_date_end=montrek_time(2024, 5, 1),  # expires before ref_date
+        )
+        hvd_a = me_factories.AHubValueDateFactory(value_date="2024-01-15")
+        me_factories.LinkHubAHubCFactory(
+            hub_in=hvd_a.hub, hub_out=sat_tsc3.hub_value_date.hub
+        )
+
+        repo = HubATSLinkedRepository({"reference_date": ref_date})
+        obj = repo.receive().get()
+        self.assertIsNone(obj.field_tsc3_int)
+        self.assertIsNone(obj.field_tsc3_str)
+
+    def test_no_link_returns_null(self):
+        """A HubA row with no link to any HubC yields null for all projected
+        fields from the linked TS satellite."""
+        me_factories.AHubValueDateFactory(value_date="2024-01-15")
+        # No LinkHubAHubCFactory — intentionally unlinked
+
+        qs = HubATSLinkedRepository().receive()
+        self.assertEqual(qs.count(), 1)
+        obj = qs.get()
+        self.assertIsNone(obj.field_tsc3_int)
+        self.assertIsNone(obj.field_tsc3_str)
+
+
+class TestJsonAggLinks(TestCase):
+    def setUp(self):
+        self.hub_c = me_factories.HubCFactory()
+
+    def test_json_agg__no_linked_value(self):
+        obj = HubCRepositoryJsonAgg().receive().get()
+        self.assertIsNone(obj.field_d1_str)
+
+    def test_json_agg__single_value(self):
+        sat_d = me_factories.SatD1Factory(field_d1_str="hello")
+        self.hub_c.link_hub_c_hub_d.add(sat_d.hub_entity)
+        obj = HubCRepositoryJsonAgg().receive().get()
+        self.assertEqual(json.loads(obj.field_d1_str), ["hello"])
+
+    def test_json_agg__multiple_values(self):
+        sat_d1 = me_factories.SatD1Factory(field_d1_str="first")
+        sat_d2 = me_factories.SatD1Factory(field_d1_str="second")
+        self.hub_c.link_hub_c_hub_d.add(sat_d1.hub_entity)
+        self.hub_c.link_hub_c_hub_d.add(sat_d2.hub_entity)
+        obj = HubCRepositoryJsonAgg().receive().get()
+        self.assertCountEqual(json.loads(obj.field_d1_str), ["first", "second"])
+
+    def test_json_agg__value_containing_separator(self):
+        sat_d = me_factories.SatD1Factory(field_d1_str="prompt; important")
+        self.hub_c.link_hub_c_hub_d.add(sat_d.hub_entity)
+        obj = HubCRepositoryJsonAgg().receive().get()
+        self.assertEqual(json.loads(obj.field_d1_str), ["prompt; important"])
+
+    def test_json_agg__value_containing_comma(self):
+        sat_d = me_factories.SatD1Factory(field_d1_str="A, B")
+        self.hub_c.link_hub_c_hub_d.add(sat_d.hub_entity)
+        obj = HubCRepositoryJsonAgg().receive().get()
+        self.assertEqual(json.loads(obj.field_d1_str), ["A, B"])
+
+    def test_json_agg__hub_d_ids_aggregated(self):
+        sat_d1 = me_factories.SatD1Factory(field_d1_str="x")
+        sat_d2 = me_factories.SatD1Factory(field_d1_str="y")
+        self.hub_c.link_hub_c_hub_d.add(sat_d1.hub_entity)
+        self.hub_c.link_hub_c_hub_d.add(sat_d2.hub_entity)
+        obj = HubCRepositoryJsonAgg().receive().get()
+        hub_d_ids = json.loads(obj.hub_d_id)
+        self.assertCountEqual(
+            hub_d_ids,
+            [sat_d1.hub_entity_id, sat_d2.hub_entity_id],
+        )
+
+
+class TestGetLinkNames(TestCase):
+    def _assert_get_links(
+        self, repo: type[MontrekRepository], expected_links: list[str]
+    ):
+        links = repo().get_link_names()
+        self.assertEqual(links, expected_links)
+
+    def test_get_repository_link_names(self):
+        for repo, expected_links in [
+            (
+                HubARepository,
+                [
+                    "link_hub_a_hub_b",
+                    "link_hub_a_hub_c",
+                    "link_hub_a_file_upload_registry",
+                    "link_hub_a_api_upload_registry",
+                ],
+            ),
+            (HubBRepository, ["link_hub_b_hub_d", "link_hub_b_hub_a"]),
+            (HubCRepository, ["link_hub_c_hub_d", "link_hub_c_hub_a"]),
+            (
+                HubDRepository,
+                ["link_hub_d_hub_e", "link_hub_d_hub_b", "link_hub_d_hub_c"],
+            ),
+        ]:
+            with self.subTest(f"Assert links for {repo}"):
+                self._assert_get_links(repo, expected_links)

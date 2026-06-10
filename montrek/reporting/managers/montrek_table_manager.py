@@ -149,14 +149,23 @@ class MontrekTableManagerABC(MontrekManager, metaclass=MontrekTableMetaClass):
         ).to_latex()
 
     def to_excel(
-        self, output: HttpResponse | BytesIO | str, sheet_name: str = "Montrek Data"
+        self,
+        output: HttpResponse | BytesIO | str,
+        sheet_name: str = "Montrek Data",
+        show_table_title: bool = False,
     ) -> HttpResponse | BytesIO | str:
         table_df = self.get_output_df()
         col_formats = self._get_excel_col_formats()
         with pd.ExcelWriter(output, engine="openpyxl") as excel_writer:
-            table_df.to_excel(excel_writer, index=False, sheet_name=sheet_name)
-            self.excel_formatter_class().format_excel(
-                excel_writer, sheet_name=sheet_name, col_formats=col_formats
+            row_offset = 3 if show_table_title else 0
+            table_df.to_excel(
+                excel_writer, index=False, sheet_name=sheet_name, startrow=row_offset
+            )
+            self.excel_formatter_class.format_excel(
+                excel_writer,
+                sheet_name=sheet_name,
+                col_formats=col_formats,
+                table_title=self.table_title if show_table_title else None,
             )
         return output
 
@@ -387,18 +396,43 @@ class MontrekTableManager(MontrekTableManagerABC):
 
 
 class MontrekDataFrameTableManager(MontrekTableManagerABC):
+    is_paginated = False
+
     def __init__(self, session_data: SessionDataType | None = None):
+        session_data = {} if session_data is None else session_data
         if "df_data" not in session_data:
             raise ValueError("DataFrame data not set in session_data['df_data'].")
         self.df_data = session_data["df_data"]
         self.df = self.set_df()
         super().__init__(session_data)
+        self.paginator: None | MontrekTablePaginator = None
+        self.paginate_by: int = self.get_paginate_by()
 
-    def get_table(self) -> QuerySet | dict:
+    def get_paginate_by(self) -> int:
+        paginate_by = self.session_data.get("current_paginate_by", 10)
+        return max(paginate_by, 5)
+
+    def get_table(self) -> list[dict]:
+        full_table = self.get_full_table()
+        if self.is_paginated:
+            return self._paginate_table(full_table)
+        return full_table
+
+    def get_full_table(self) -> list[dict]:
         return self.df_data
 
-    def get_full_table(self) -> QuerySet | dict:
-        return self.get_table()
+    def _paginate_table(self, full_table: list) -> list:
+        page_number = int(self.session_data.get("page", [1])[0])
+        paginate_by = self.paginate_by
+        offset = (page_number - 1) * paginate_by
+        len_full_table = len(full_table)
+
+        self.paginator = MontrekTablePaginator(
+            number=page_number,
+            num_pages=math.ceil(len_full_table / paginate_by),
+            show_paginator=len_full_table > paginate_by,
+        )
+        return full_table[offset : offset + paginate_by]
 
     def set_df(self):
         return pd.DataFrame(self.df_data)

@@ -1,14 +1,12 @@
 from baseclasses.repositories.montrek_repository import MontrekRepository
-from django.utils import timezone
 from montrek_example.models import example_models as me_models
 
 
 class HubDRepository(MontrekRepository):
     hub_class = me_models.HubD
+    consider_session_dates = False
 
     def set_annotations(self):
-        self.session_data["start_date"] = timezone.datetime.min
-        self.session_data["end_date"] = timezone.datetime.max
         self.add_satellite_fields_annotations(
             me_models.SatD1,
             ["field_d1_str", "field_d1_int"],
@@ -50,4 +48,58 @@ class HubDRepositoryReversedParentLink(MontrekRepository):
             ["field_a1_str"],
             parent_link_classes=(me_models.LinkHubCHubD,),
             reversed_link=True,
+        )
+
+
+class HubDTSLinkAggRepositorySum(MontrekRepository):
+    hub_class = me_models.HubD
+
+    def set_annotations(self):
+        self.add_linked_satellites_field_annotations(
+            me_models.SatTSC2,
+            me_models.LinkHubCHubD,
+            ["field_tsc2_float"],
+            reversed_link=True,
+            agg_func="sum_value_date",
+        )
+
+
+class HubDTSLinkAggRepositoryWithLinkHubValueDateFilter(MontrekRepository):
+    """Aggregates SatTSC2 across the reversed LinkHubCHubD link twice: once at
+    the outer row's own value date (default behaviour) and once pinned to an
+    explicit value date via ``link_hub_value_date_filter``, decoupling the
+    linked satellite's value date from the outer row's."""
+
+    hub_class = me_models.HubD
+    latest_ts = True
+
+    def set_annotations(self):
+        self.add_linked_satellites_field_annotations(
+            me_models.SatTSC2,
+            me_models.LinkHubCHubD,
+            ["field_tsc2_float"],
+            reversed_link=True,
+            agg_func="mean",
+        )
+        self.add_linked_satellites_field_annotations(
+            me_models.SatTSC2,
+            me_models.LinkHubCHubD,
+            ["field_tsc2_float"],
+            reversed_link=True,
+            agg_func="mean",
+            rename_field_map={"field_tsc2_float": "prev_field_tsc2_float"},
+            link_hub_value_date_filter={
+                "value_date_list__value_date": self.session_data.get("prev_value_date")
+            },
+        )
+        self.add_linked_satellites_field_annotations(
+            me_models.SatTSC2,
+            me_models.LinkHubCHubD,
+            ["field_tsc2_float"],
+            reversed_link=True,
+            agg_func="sum",
+            rename_field_map={"field_tsc2_float": "prev_field_tsc2_float_sum"},
+            link_hub_value_date_filter={
+                "value_date_list__value_date": self.session_data.get("prev_value_date")
+            },
         )

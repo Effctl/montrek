@@ -1,10 +1,13 @@
+from django.db.models import OuterRef
 from baseclasses.repositories.montrek_repository import MontrekRepository
+from baseclasses.repositories.subquery_builder import LinkedHubJsonField
 from montrek_example.models import example_models as me_models
 from montrek_example.repositories.hub_d_repository import HubDRepository
 
 
 class HubCRepository(MontrekRepository):
     hub_class = me_models.HubC
+    consider_session_dates = True
 
     def set_annotations(self):
         self.add_satellite_fields_annotations(
@@ -49,6 +52,7 @@ class HubCRepository(MontrekRepository):
             me_models.LinkHubCHubD,
             ["field_tsd2_float", "field_tsd2_int"],
             link_satellite_filter={"field_tsd2_float__gte": 0},
+            agg_func="string_concat",
         )
         self.add_linked_satellites_field_annotations(
             me_models.SatTSD2,
@@ -73,6 +77,32 @@ class HubCRepository(MontrekRepository):
 
 class HubCRepositoryLastTS(HubCRepository):
     latest_ts = True
+    consider_session_dates = False
+
+    def set_annotations(self):
+        super().set_annotations()
+        self.add_satellite_fields_annotations(
+            me_models.SatTSC2,
+            ["field_tsc2_float"],
+            rename_field_map={"field_tsc2_float": "prev_field_tsc2_float"},
+            hub_satellite_filter={
+                "hub_value_date__value_date_list__value_date__lt": OuterRef(
+                    "value_date_list__value_date"
+                ),
+            },
+        )
+
+
+class HubCRepositoryPropertyFilter(MontrekRepository):
+    hub_class = me_models.HubC
+    latest_ts = True
+
+    def set_annotations(self):
+        self.add_satellite_fields_annotations(
+            me_models.SatTSC2,
+            ["field_tsc2_float"],
+            hub_satellite_filter={"field_tsc2_float__gte": 2.0},
+        )
 
 
 class HubCRepositorySumTS(MontrekRepository):
@@ -257,6 +287,43 @@ class HubCRepositoryWithManyToManyParents(MontrekRepository):
         )
 
 
+class HubCRepositoryWithValueDateScopedLink(MontrekRepository):
+    hub_class = me_models.HubC
+
+    def set_annotations(self):
+        self.add_satellite_fields_annotations(
+            me_models.SatTSC2,
+            ["field_tsc2_float"],
+        )
+        self.add_linked_satellites_field_annotations(
+            me_models.SatE1,
+            me_models.LinkHubDHubE,
+            ["field_e1_str"],
+            parent_link_classes=(me_models.LinkHubCHubD,),
+            value_date_scope_path="hub_in__hub_value_date",
+        )
+
+
+class HubCRepositoryWithPairedJsonAnnotation(MontrekRepository):
+    hub_class = me_models.HubC
+
+    def set_annotations(self):
+        self.add_linked_hub_paired_json_annotation(
+            me_models.SatTSD2,
+            "field_tsd2_float",
+            me_models.LinkHubCHubD,
+            (
+                LinkedHubJsonField(
+                    output_key="field_e1_str",
+                    satellite_class=me_models.SatE1,
+                    field="field_e1_str",
+                    link_class=me_models.LinkHubDHubE,
+                ),
+            ),
+            "tsd2_with_e1_details",
+        )
+
+
 class HubCRepositoryWithManyToOneParents(MontrekRepository):
     hub_class = me_models.HubC
 
@@ -307,4 +374,39 @@ class HubCRepositoryAll(MontrekRepository):
             ["field_a2_float"],
             reversed_link=True,
             agg_func="all",
+        )
+
+
+class HubCRepositoryJsonAgg(MontrekRepository):
+    hub_class = me_models.HubC
+
+    def set_annotations(self):
+        self.add_linked_satellites_field_annotations(
+            me_models.SatD1,
+            me_models.LinkHubCHubD,
+            ["field_d1_str", "hub_entity_id"],
+            rename_field_map={"hub_entity_id": "hub_d_id"},
+            agg_func="json_agg",
+        )
+
+
+class HubCRepositoryDirectLinkHub(MontrekRepository):
+    hub_class = me_models.HubC
+
+    def set_annotations(self):
+        self.add_satellite_fields_annotations(
+            me_models.SatC1,
+            [
+                "field_c1_str",
+            ],
+        )
+        self.add_linked_satellites_field_annotations(
+            me_models.SatA1,
+            me_models.LinkHubAHubC,
+            ["hub_entity_id"],
+            rename_field_map={"hub_entity_id": "hub_a_id"},
+            reversed_link=True,
+        )
+        self.add_linked_hub_id(
+            me_models.LinkHubAHubC, "hub_a_direct_id", reversed_link=True
         )

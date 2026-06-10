@@ -1,6 +1,7 @@
 import collections
 import datetime
 import inspect
+import json
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -116,7 +117,7 @@ class TableElement:
             display_value=table_element.format(value),
             style_attrs_str=style_attrs_str,
             td_classes_str=td_classes_str,
-            hover_text=self.get_hover_text(obj),
+            hover_text=self.get_hover_text(obj, obj_value),
             value=obj_value,
         )
 
@@ -140,7 +141,7 @@ class TableElement:
                     return not any(True for _ in value)
         return False
 
-    def get_hover_text(self, _obj: Any) -> str | None:
+    def get_hover_text(self, _obj: Any, _value: Any) -> str | None:
         return self.hover_text
 
     def render_field_template(self, value: Any, obj: Any) -> str:
@@ -178,6 +179,9 @@ class AttrTableElement(TableElement):
 
     def get_value(self, obj: Any) -> Any:
         attr = self.attr
+        return self._get_value_from_attr(obj, attr)
+
+    def _get_value_from_attr(self, obj: Any, attr: str) -> Any:
         if isinstance(obj, dict):
             value = obj.get(attr, attr)
         else:
@@ -225,8 +229,7 @@ class ExternalLinkTableElement(AttrTableElement):
             return "https://" + url
         return url
 
-    def get_hover_text(self, obj: Any) -> str | None:
-        value = self.get_value(obj)
+    def get_hover_text(self, obj: Any, value: Any) -> str | None:
         if value is None:
             return "No link"
         return value
@@ -298,7 +301,7 @@ class BaseLinkTableElement(TableElement, GetDottetAttrsOrArgMixin):
         kwargs = {
             key: self.get_dotted_attr_or_arg(obj, value)
             for key, value in self.kwargs.items()
-            if key != "filter"
+            if key not in ["filter", "filter_field"]
         }
         kwargs = {key: str(value).replace("/", "_") for key, value in kwargs.items()}
         kwargs.update(self.static_kwargs)
@@ -318,14 +321,18 @@ class BaseLinkTableElement(TableElement, GetDottetAttrsOrArgMixin):
         return f"{url}?{query}" if query else url
 
     def get_filter(self, obj: Any) -> dict[str, Any]:
-        filter_field = self.kwargs.get("filter")
-        if filter_field:
-            return {
-                "filter_field": filter_field,
-                "filter_lookup": "in",
-                "filter_value": self.get_dotted_attr_or_arg(obj, filter_field),
-            }
-        return {}
+        filter_value_field = self.kwargs.get("filter")
+        if filter_value_field is None:
+            return {}
+        filter_field = self.kwargs.get("filter_field")
+        if filter_field is None:
+            filter_field = filter_value_field
+
+        return {
+            "filter_field": filter_field,
+            "filter_lookup": "in",
+            "filter_value": self.get_dotted_attr_or_arg(obj, filter_value_field),
+        }
 
     def get_link(self, obj: Any) -> str | None:
         url = self.get_url(obj)
@@ -374,7 +381,7 @@ class LinkListTableElement(TableElement, GetDottetAttrsOrArgMixin):
     text: str = field(default="")
     list_attr: str = field(default="")
     list_kwarg: str = field(default="")
-    in_separator: str = ";"
+    in_separator: str | None = None
     field_template: ClassVar[str | None] = "link_list"
 
     def get_field_context_data(self, value: Any, obj: Any) -> dict[str, Any]:
@@ -402,15 +409,22 @@ class LinkListTableElement(TableElement, GetDottetAttrsOrArgMixin):
 
     def get_list_values(self, obj: Any) -> list[str]:
         list_values = self.get_dotted_attr_or_arg(obj, self.list_attr)
-        return str(list_values).split(self.in_separator) if list_values else []
+        if not list_values:
+            return []
+        if self.in_separator is None:
+            return json.loads(str(list_values))
+        return str(list_values).split(self.in_separator)
 
     def format(self, value):
         return value
 
     def get_value(self, obj: Any) -> list[str]:
         text_values = self.get_dotted_attr_or_arg(obj, self.text)
-        text_values = str(text_values).split(self.in_separator) if text_values else []
-        return text_values
+        if not text_values:
+            return []
+        if self.in_separator is None:
+            return json.loads(str(text_values))
+        return str(text_values).split(self.in_separator)
 
     def format_latex(self, value):
         return " \\color{{black}} {} &".format(",".join(self._unique_list(value)))
@@ -519,7 +533,7 @@ class NumberTableElement(AttrTableElement):
             td_classes_str=table_element.format_td_classes(
                 self.get_td_classes(value, obj)
             ),
-            hover_text=self.get_hover_text(obj),
+            hover_text=self.get_hover_text(obj, value),
             value=value,
         )
 
@@ -622,10 +636,12 @@ class ProgressBarTableElement(NumberTableElement):
     field_template: ClassVar[str | None] = "progress_bar"
 
     def get_field_context_data(self, value: Any, _obj: Any) -> dict[str, Any]:
+        if settings.NUMBER_FORMATTING == SystemFormatting.DE:
+            value = value.replace(".", "").replace(",", ".")
         value = float(value)
         per_value = value * 100
-        out_value = f"{value * 100:.2f}"
-        return {"per_value": per_value, "out_value": out_value}
+        out_value = f"{value * 100:.0f}"
+        return {"per_value": str(per_value), "out_value": out_value}
 
     def format_latex(self, value) -> str:
         per_value = value * 100
@@ -875,6 +891,103 @@ class LabelTableElement(AttrTableElement):
             f"{{\\textcolor[HTML]{{{font_color.hex.lstrip('#')}}}"
             f"{{\\textbf{{{value_str}}}}}}} &"
         )
+
+
+@dataclass
+class CompData:
+    num: int
+    latex_val: str
+    hover_text: str
+
+
+class CompValues(Enum):
+    EQUAL = CompData(num=0, latex_val="{\\color{green}$\\rightarrow$}", hover_text="=")
+    GREATER = CompData(num=1, latex_val="{\\color{orange}$\\nearrow$}", hover_text=">")
+    MUCH_GREATER = CompData(
+        num=2, latex_val="{\\color{red}$\\uparrow$}", hover_text=">>"
+    )
+    LESS = CompData(num=-1, latex_val="{\\color{orange}$\\searrow$}", hover_text="<")
+    MUCH_LESS = CompData(
+        num=-2, latex_val="{\\color{red}$\\downarrow$}", hover_text="<<"
+    )
+    NONE = CompData(num=99, latex_val="", hover_text="Unknown")
+
+
+class CompDataField(serializers.Field):
+    """DRF field that serializes a :class:`CompData` instance as a plain dict.
+
+    Accepts both a raw ``CompData`` dataclass instance and an already-converted
+    ``dict`` (the latter arises when the value has been pre-processed by
+    :class:`~reporting.modules.table_serializer.TableSerializer`).
+    """
+
+    _REQUIRED_KEYS = frozenset({"num", "latex_val", "hover_text"})
+
+    def to_representation(self, value):
+        if value is None:
+            return None
+        if isinstance(value, CompData):
+            import dataclasses
+
+            return dataclasses.asdict(value)
+        if isinstance(value, dict):
+            return value
+        raise serializers.ValidationError(
+            f"Expected a CompData instance or dict, got {type(value).__name__!r}."
+        )
+
+    def to_internal_value(self, data):
+        if not isinstance(data, dict):
+            raise serializers.ValidationError(
+                f"Expected a dict, got {type(data).__name__!r}."
+            )
+        missing = self._REQUIRED_KEYS - data.keys()
+        if missing:
+            raise serializers.ValidationError(
+                f"Missing required keys: {sorted(missing)}."
+            )
+        try:
+            return CompData(
+                num=int(data["num"]),
+                latex_val=data["latex_val"],
+                hover_text=data["hover_text"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+
+@dataclass
+class ComparisonTableElement(AttrTableElement):
+    comp_attr: str = field(default="")
+    field_template: ClassVar[str | None] = "comparison"
+    much_comp_limit: ClassVar[float] = 0.5
+    serializer_field_class: ClassVar = CompDataField
+
+    def get_value(self, obj: Any) -> Any:
+        value = super().get_value(obj)
+        comp_value = self._get_value_from_attr(obj, self.comp_attr)
+        if pd.isna(value) or pd.isna(comp_value):
+            return CompValues.NONE.value
+        if value == comp_value:
+            return CompValues.EQUAL.value
+        is_greater = value > comp_value
+        is_much = (
+            comp_value == 0
+            or abs(value - comp_value) / comp_value > self.much_comp_limit
+        )
+        if is_greater:
+            return (
+                CompValues.MUCH_GREATER.value if is_much else CompValues.GREATER.value
+            )
+        return CompValues.MUCH_LESS.value if is_much else CompValues.LESS.value
+
+    def format_latex(self, value) -> str:
+        return value.latex_val + " &"
+
+    def get_hover_text(self, obj: Any, value: Any) -> str | None:
+        start_value = super().get_value(obj)
+        comp_value = self._get_value_from_attr(obj, self.comp_attr)
+        return f"{start_value} {value.hover_text} {comp_value}"
 
 
 class SecretStringTableElement(StringTableElement):

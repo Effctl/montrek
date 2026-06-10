@@ -10,6 +10,12 @@ from django.contrib import messages
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.views.decorators.http import require_safe
+from data_import.base.views.data_import_views import DataImportView
+from file_export.views.file_export_views import (
+    FileExportDownloadView,
+    FileExportRegistryListView,
+    FileExportTriggerView,
+)
 from file_upload.views import (
     FileUploadRegistryView,
     MontrekDownloadFileView,
@@ -24,6 +30,10 @@ from montrek_example.managers import montrek_example_managers as mem
 from montrek_example.managers.a1_field_map_manager import A1FieldMapManager
 from montrek_example.managers.a1_file_upload_manager import A1FileUploadManager
 from montrek_example.managers.a2_api_upload_manager import A2ApiUploadManager
+from montrek_example.managers.a_file_export_manager import (
+    HubAFileExportManager,
+    HubAFileExportRegistryManager,
+)
 from montrek_example.managers.a_upload_table_manager import (
     HubAFileUploadRegistryManager,
     HubAUploadTableManager,
@@ -69,6 +79,7 @@ class MontrekExampleACreate(views.MontrekCreateView):
     form_class = forms.ExampleACreateForm
     success_url = "montrek_example_a_list"
     title = "Create Example A"
+    do_return_to_referer = True
 
 
 class MontrekExampleAUpdate(views.MontrekUpdateView):
@@ -76,6 +87,7 @@ class MontrekExampleAUpdate(views.MontrekUpdateView):
     page_class = pages.ExampleAPage
     form_class = forms.ExampleACreateForm
     success_url = "montrek_example_a_list"
+    do_return_to_referer = True
     title = "Update Example A"
 
 
@@ -110,6 +122,13 @@ class MontrekExampleAList(views.MontrekListView):
             action_run_sequential_task,
             action_run_parallel_task,
         )
+
+
+class MontrekExampleADataFrameList(views.MontrekListView):
+    manager_class = mem.HubADataFrameManager
+    page_class = pages.MontrekExampleAAppPage
+    tab = "tab_example_a_df_list"
+    title = "Example A DataFrame List"
 
 
 class MontrekExampleADownloadView(views.MontrekDownloadView):
@@ -149,6 +168,13 @@ class MontrekExampleDDetails(views.MontrekDetailView):
     title = "Example D Details"
 
 
+class MontrekExampleCLastTSDetails(views.MontrekDetailView):
+    manager_class = mem.HubCLastTSDetailsManager
+    page_class = pages.MontrekExampleCAppPage
+    tab = "tab_details"
+    title = "Example C Details"
+
+
 class MontrekExampleBCreate(views.MontrekCreateView):
     manager_class = mem.HubBManager
     page_class = pages.MontrekExampleBAppPage
@@ -160,9 +186,17 @@ class MontrekExampleBCreate(views.MontrekCreateView):
 class MontrekExampleBUpdate(views.MontrekUpdateView):
     manager_class = mem.HubBManager
     page_class = pages.MontrekExampleBAppPage
-    success_url = "montrek_example_b_list"
+    success_url = "montrek_example_b_details"
     form_class = forms.ExampleBCreateForm
     title = "Update Example B"
+    go_to_details = True
+
+
+class MontrekExampleBDetails(views.MontrekDetailView):
+    manager_class = mem.HubBDetailsManager
+    page_class = pages.MontrekExampleBAppPage
+    tab = "tab_details"
+    title = "Example B Details"
 
 
 class MontrekExampleBList(views.MontrekListView):
@@ -359,20 +393,6 @@ class MontrekExampleHubAApiUploadView(views.MontrekListView):
         return (action_do_a2_upload,)
 
 
-def do_a2_upload(request):
-    manager = A2ApiUploadManager(
-        session_data={
-            "user_id": request.user.id,
-            "user": "user",
-            "password": "password",
-        },
-    )
-    manager.process_import_data({})
-    for m in manager.messages:
-        getattr(messages, m.message_type)(request, m.message)
-    return HttpResponseRedirect(reverse("hub_a_view_api_uploads"))
-
-
 class A2ApiUploadView(AuthenticatorUserPasswordView):
     page_class = pages.MontrekExampleAAppPage
     title = "A2 Api Upload"
@@ -385,6 +405,11 @@ class A2ApiUploadView(AuthenticatorUserPasswordView):
         manager.process_import_data({})
         for m in manager.messages:
             getattr(messages, m.message_type)(self.request, m.message)
+
+
+class A2ApiDirectUploadView(DataImportView):
+    success_url = "hub_a_view_api_uploads"
+    manager_class = A2ApiUploadManager
 
 
 class MontrekExampleA1DownloadFileView(MontrekDownloadFileView):
@@ -452,3 +477,18 @@ class HubARedirectView(views.MontrekRedirectView):
 
     def get_redirect_url(self, *args, **kwargs):
         return reverse("montrek_example_a_list")
+
+
+class HubAFileExportTriggerView(FileExportTriggerView):
+    manager_class = HubAFileExportManager
+    success_url = "hub_a_file_export_list"
+
+
+class HubAFileExportDownloadView(FileExportDownloadView):
+    manager_class = HubAFileExportRegistryManager
+
+
+class HubAFileExportRegistryListView(FileExportRegistryListView):
+    manager_class = HubAFileExportRegistryManager
+    page_class = pages.MontrekExampleAAppPage
+    title = "Hub A File Exports"

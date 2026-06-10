@@ -1,12 +1,16 @@
-from baseclasses.typing import TableElementsType
+from baseclasses.typing import SessionDataType, TableElementsType
 from django.http import HttpResponse
 from django.urls import reverse
+from django_pandas.io import read_frame
 from montrek_example.repositories.hub_a_repository import (
     HubARepository,
     HubARepository5,
 )
 from montrek_example.repositories.hub_b_repository import HubBRepository
-from montrek_example.repositories.hub_c_repository import HubCRepository
+from montrek_example.repositories.hub_c_repository import (
+    HubCRepository,
+    HubCRepositoryLastTS,
+)
 from montrek_example.repositories.hub_d_repository import HubDRepository
 from montrek_example.repositories.sat_a1_repository import SatA1Repository
 from reporting.core import reporting_text as rt
@@ -15,6 +19,7 @@ from reporting.managers.montrek_details_manager import MontrekDetailsManager
 from reporting.managers.montrek_report_manager import MontrekReportManager
 from reporting.managers.montrek_table_manager import (
     HistoryDataTableManager,
+    MontrekDataFrameTableManager,
     MontrekTableManager,
 )
 
@@ -64,7 +69,7 @@ class CompactHubAManager(MontrekTableManager):
     is_compact_format = True
 
     @property
-    def table_elements(self) -> tuple:
+    def table_elements(self) -> TableElementsType:
         return (
             te.LinkTextTableElement(
                 name="A1 String",
@@ -86,7 +91,7 @@ class HubAManager(MontrekTableManager):
     repository_class = HubARepository
 
     @property
-    def table_elements(self) -> tuple:
+    def table_elements(self) -> TableElementsType:
         return (
             te.StringTableElement(name="A1 String", attr="field_a1_str"),
             te.IntTableElement(name="A1 Int", attr="field_a1_int"),
@@ -127,11 +132,39 @@ class HubAManager(MontrekTableManager):
         return "example_md.txt"
 
 
+class HubADataFrameManager(MontrekDataFrameTableManager):
+    repository_class = HubARepository
+    table_title = "Example A DataFrame List"
+    field_names = (
+        "field_a1_str",
+        "field_a1_int",
+        "field_a2_str",
+        "field_a2_float",
+    )
+    is_paginated = True
+
+    def __init__(self, session_data: SessionDataType | None = None):
+        session_data = {} if session_data is None else session_data
+        self.session_data = session_data
+        df = read_frame(self.repository.receive(), fieldnames=self.field_names)
+        session_data = session_data | {"df_data": df.to_dict(orient="records")}
+        super().__init__(session_data)
+
+    @property
+    def table_elements(self) -> TableElementsType:
+        return (
+            te.StringTableElement(name="A1 String", attr="field_a1_str"),
+            te.IntTableElement(name="A1 Int", attr="field_a1_int"),
+            te.StringTableElement(name="A2 String", attr="field_a2_str"),
+            te.FloatTableElement(name="A2 Float", attr="field_a2_float"),
+        )
+
+
 class SatA1Manager(MontrekTableManager):
     repository_class = SatA1Repository
 
     @property
-    def table_elements(self) -> list:
+    def table_elements(self) -> TableElementsType:
         return (
             te.StringTableElement(name="A1 String", attr="field_a1_str"),
             te.IntTableElement(name="A1 Int", attr="field_a1_int"),
@@ -229,7 +262,7 @@ class HubCManager(MontrekTableManager):
     repository_class = HubCRepository
 
     @property
-    def table_elements(self) -> list:
+    def table_elements(self) -> TableElementsType:
         return (
             te.DateTableElement(name="Value Date", attr="value_date"),
             te.StringTableElement(name="C1 String", attr="field_c1_str"),
@@ -237,11 +270,24 @@ class HubCManager(MontrekTableManager):
         )
 
 
+class HubCLastTSDetailsManager(MontrekDetailsManager):
+    repository_class = HubCRepositoryLastTS
+
+    @property
+    def table_elements(self) -> TableElementsType:
+        return (
+            te.DateTableElement(name="Value Date", attr="value_date"),
+            te.StringTableElement(name="C1 String", attr="field_c1_str"),
+            te.IntTableElement(name="C1 Bool", attr="field_c1_bool"),
+            te.FloatTableElement(name="TSC2 Float", attr="field_tsc2_float"),
+        )
+
+
 class HubDManager(MontrekTableManager):
     repository_class = HubDRepository
 
     @property
-    def table_elements(self) -> list:
+    def table_elements(self) -> TableElementsType:
         return [
             te.StringTableElement(name="D1 String", attr="field_d1_str"),
             te.IntTableElement(name="D1 Int", attr="field_d1_int"),
@@ -263,7 +309,7 @@ class HubDDetailsManager(MontrekDetailsManager):
     repository_class = HubDRepository
 
     @property
-    def table_elements(self) -> list:
+    def table_elements(self) -> TableElementsType:
         return [
             te.StringTableElement(name="D1 String", attr="field_d1_str"),
             te.IntTableElement(name="D1 Int", attr="field_d1_int"),
@@ -277,4 +323,14 @@ class HubDDetailsManager(MontrekDetailsManager):
                 icon="trash",
                 hover_text="Delete Example D",
             ),
+        ]
+
+
+class HubBDetailsManager(MontrekDetailsManager):
+    repository_class = HubBRepository
+
+    @property
+    def table_elements(self) -> TableElementsType:
+        return [
+            te.StringTableElement(name="B1 String", attr="field_b1_str"),
         ]
