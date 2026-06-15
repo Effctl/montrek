@@ -952,7 +952,10 @@ class LinkedHubPairedJsonSubqueryBuilder(LinkedSatelliteSubqueryBuilderBase):
             ).values(json_field.field)[:1]
         )
 
-    def build(self, reference_date: timezone.datetime) -> Subquery:
+    def build(
+        self, reference_date: timezone.datetime, queryset: QuerySet | None = None
+    ) -> Subquery:
+        _ = queryset
         rows = self.get_link_hub_value_date_query(
             self._hub_field_from, reference_date
         ).annotate(
@@ -1040,3 +1043,15 @@ class LinkAggFunctionEnum(Enum):
     MEAN = "mean"
     COUNT = "count"
     ALL = "all"
+
+
+LINK_AGG_FIELD_TYPE_MAP = {
+    LinkAggFunctionEnum.SUM.value: None,
+    LinkAggFunctionEnum.SUM_VALUE_DATE.value: None,
+    LinkAggFunctionEnum.STRING_CONCAT.value: models.CharField,
+    LinkAggFunctionEnum.JSON_AGG.value: models.CharField,
+    LinkAggFunctionEnum.LATEST.value: None,
+    LinkAggFunctionEnum.MEAN.value: models.FloatField,
+    LinkAggFunctionEnum.COUNT.value: models.IntegerField,
+    LinkAggFunctionEnum.ALL.value: models.BooleanField,
+}

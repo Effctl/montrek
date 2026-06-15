@@ -59,13 +59,14 @@ class TestMontrekDetailsManager(TestCase):
         # Field E with currency and style
         field_e_td = cell_map["Field E"]
         self.assertTrue(field_e_td.get_text(strip=True).endswith("€"))
+        # Non-negative numbers inherit the table text color (no inline style)
         style_e = field_e_td.get("style", "")
-        self.assertIn("color", style_e)
-        self.assertIn("#002F6C", style_e)
+        self.assertNotIn("color", style_e)
 
         # Link cell with icon
         link_td = cell_map["Link"]
-        self.assertEqual(link_td.get("title"), "Link")
+        self.assertEqual(link_td.get("data-bs-title"), "Link")
+        self.assertEqual(link_td.get("data-bs-toggle"), "tooltip")
         link_a = link_td.find("a", id="id__home")
         self.assertIsNotNone(link_a)
         self.assertEqual(link_a.get("href"), "/home")
@@ -73,7 +74,7 @@ class TestMontrekDetailsManager(TestCase):
 
         # Link Text cell with anchor text
         link_text_td = cell_map["Link Text"]
-        self.assertEqual(link_text_td.get("title"), "Link Text")
+        self.assertEqual(link_text_td.get("data-bs-title"), "Link Text")
         link_text_a = link_text_td.find("a", id="id__home")
         self.assertIsNotNone(link_text_a)
         self.assertEqual(link_text_a.get("href"), "/home")

@@ -6,8 +6,8 @@ from django.db import models
 from django.db.models import ExpressionWrapper, Field, QuerySet, Subquery
 from django.utils import timezone
 from baseclasses.repositories.subquery_builder import (
+    LINK_AGG_FIELD_TYPE_MAP,
     LinkedSatelliteSubqueryBuilderBase,
-    ReverseLinkedSatelliteSubqueryBuilder,
     SubqueryBuilder,
     TSSumFieldSubqueryBuilder,
     ValueDateSubqueryBuilder,
@@ -19,8 +19,6 @@ from baseclasses.repositories.subquery_builder import (
 from baseclasses.models import (
     MontrekLinkABC,
     MontrekHubABC,
-    MontrekManyToManyLinkABC,
-    MontrekOneToManyLinkABC,
     MontrekSatelliteBaseABC,
 )
 
@@ -241,7 +239,6 @@ class Annotator:
         **kwargs,
     ):
         link_class = kwargs["link_class"]
-        agg_func = kwargs["agg_func"]
 
         self.annotated_link_classes.append(link_class)
         self.add_to_annotated_satellite_classes(satellite_class)
@@ -254,6 +251,7 @@ class Annotator:
         # which matches the linked hub's HubValueDate at the same value date.
         probe_builder = subquery_builder(satellite_class, fields[0], **kwargs)
         is_scalar = not probe_builder._is_multiple_allowed(probe_builder._hub_field_to)
+        agg_func = kwargs["agg_func"]
 
         if is_scalar:
             linked_alias = self._get_or_create_linked_satellite_alias(
@@ -279,17 +277,10 @@ class Annotator:
                 self.set_field_type(field, outfield, satellite_class)
                 self._field_names_in_order.append(outfield)
 
-                if issubclass(link_class, MontrekManyToManyLinkABC) or (
-                    issubclass(link_class, MontrekOneToManyLinkABC)
-                    and isinstance(
-                        self.annotations[outfield],
-                        ReverseLinkedSatelliteSubqueryBuilder,
-                    )
-                    and agg_func == "string_concat"
-                ):
-                    self.field_type_map[outfield] = models.CharField(
-                        null=True, blank=True
-                    )
+                field_type = LINK_AGG_FIELD_TYPE_MAP[agg_func]
+
+                if field_type is not None:
+                    self.field_type_map[outfield] = field_type(null=True, blank=True)
 
     def _get_or_create_linked_satellite_alias(
         self,
