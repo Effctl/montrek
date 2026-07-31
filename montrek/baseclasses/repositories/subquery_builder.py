@@ -12,6 +12,7 @@ from baseclasses.models import (
     MontrekManyToManyLinkABC,
     MontrekOneToManyLinkABC,
     MontrekSatelliteABC,
+    MontrekTimeSeriesSatelliteABC,
     ValueDateList,
 )
 from django.conf import settings
@@ -32,8 +33,9 @@ from django.db.models import (
     Sum,
     Value,
     When,
+    Window,
 )
-from django.db.models.functions import Cast, JSONObject, NullIf
+from django.db.models.functions import Cast, FirstValue, JSONObject, Lag, NullIf
 from django.utils import timezone
 
 
@@ -60,6 +62,18 @@ class CrossSatelliteFilter:
     reversed_link: bool = False
 
 
+@dataclass
+class AnnotationContext:
+    """Properties of the repository a subquery builder is registered on.
+
+    ``latest_ts`` mirrors ``MontrekRepository.latest_ts``: True when the
+    queryset holds a single (latest) value date per hub, False when it holds
+    the full timeseries, one row per value date.
+    """
+
+    latest_ts: bool = False
+
+
 class SubqueryBuilder:
     def build(
         self,
@@ -69,6 +83,14 @@ class SubqueryBuilder:
         raise NotImplementedError(
             f"{self.__class__.__name__} must be subclassed and the build method must be implemented!"
         )
+
+    def bind_context(self, context: AnnotationContext) -> None:
+        """Hook called when the builder is registered on a repository via
+        ``MontrekRepository.add_annotation``.
+
+        Builders whose SQL depends on how many rows the queryset holds per hub
+        override this; by default it is a no-op.
+        """
 
     def build_subquery(
         self,
@@ -191,6 +213,182 @@ class TSSumFieldSubqueryBuilder(SubqueryBuilder):
             .values("total")
         )
         return Subquery(qs)
+
+
+class PreviousTSValueSubqueryBuilder(SubqueryBuilder):
+    """Value of a timeseries satellite field at the value date preceding the
+    outer row's own value date.
+
+    How the predecessor is found depends on how many rows the repository holds
+    per hub, which :meth:`bind_context` picks up from the repository:
+
+    * ``latest_ts=True`` — the queryset holds one row per hub, so there is no
+      preceding row to look at and the predecessor is read from the satellite
+      history with a correlated subquery: the greatest value date strictly
+      smaller than the row's own one.
+    * ``latest_ts=False`` — the queryset holds the timeseries itself, and the
+      predecessor is the preceding *row of that queryset*, computed with a LAG
+      window function.  Window functions are evaluated after the WHERE clause,
+      so the value follows whatever the caller filtered the queryset down to
+      (e.g. ``receive().filter(~Q(value_date=...))`` skips the excluded date
+      instead of reaching behind the filter).
+
+    Either way gaps are skipped rather than yielding NULL; only rows without
+    any predecessor (a hub's first value date) yield NULL.
+
+    ``satellite_filter`` narrows which satellite records qualify, both for the
+    current and for the previous value date (e.g. ``{"nav__gt": 0}``).
+    """
+
+    # Set from the repository via bind_context(); the correlated-subquery
+    # variant is the default because it is valid for any row semantics.
+    use_window: bool = False
+
+    def __init__(
+        self,
+        satellite_class: type[MontrekTimeSeriesSatelliteABC],
+        field: str,
+        satellite_filter: dict[str, Any] | Q | None = None,
+    ):
+        if not satellite_class.is_timeseries:
+            raise TypeError(
+                f"{type(self).__name__} requires a timeseries satellite_class; "
+                f"got {satellite_class.__name__}"
+            )
+        if satellite_filter is None:
+            satellite_filter = Q()
+        elif not isinstance(satellite_filter, Q):
+            satellite_filter = Q(**satellite_filter)
+        self.satellite_class = satellite_class
+        self.field = field
+        self.satellite_filter = satellite_filter
+        # Type of the satellite field itself, used as output_field of the inner
+        # subqueries; field_type is the type of what build() finally annotates.
+        self.value_field_type = satellite_class._meta.get_field(field).clone()
+        self.field_type = self.value_field_type.clone()
+
+    def bind_context(self, context: AnnotationContext) -> None:
+        self.use_window = not context.latest_ts
+
+    def current_filter(self) -> Q:
+        """Satellite belonging to the outer row's own HubValueDate."""
+        return Q(hub_value_date=OuterRef("pk"))
+
+    def previous_filter(self) -> Q:
+        """Satellites of the same hub at earlier value dates; combined with the
+        descending ordering in :meth:`value_subquery` this picks the latest of
+        them."""
+        return Q(
+            hub_value_date__hub_id=OuterRef("hub_id"),
+            hub_value_date__value_date_list__value_date__lt=OuterRef(
+                "value_date_list__value_date"
+            ),
+        )
+
+    def hub_filter(self) -> Q:
+        """All satellites of the same hub; combined with the ascending ordering
+        in :meth:`value_subquery` this picks the earliest of them."""
+        return Q(hub_value_date__hub_id=OuterRef("hub_id"))
+
+    def value_subquery(
+        self,
+        reference_date: timezone.datetime,
+        value_date_filter: Q,
+        *,
+        latest: bool = True,
+    ) -> Subquery:
+        order_field = "hub_value_date__value_date_list__value_date"
+        return Subquery(
+            self.satellite_class.objects.filter(
+                value_date_filter,
+                self.satellite_filter,
+                state_date_start__lte=reference_date,
+                state_date_end__gt=reference_date,
+            )
+            .order_by(f"-{order_field}" if latest else order_field)
+            .values(self.field)[:1],
+            output_field=self.value_field_type,
+        )
+
+    def window(self, function: type[Func], reference_date: timezone.datetime) -> Window:
+        """Apply a window function to the row's own value, over the rows of the
+        queryset: per hub, ordered by value date."""
+        return Window(
+            expression=function(
+                self.value_subquery(reference_date, self.current_filter())
+            ),
+            partition_by=[F("hub_id")],
+            order_by=F("value_date_list__value_date").asc(),
+        )
+
+    def previous_value(self, reference_date: timezone.datetime) -> Subquery | Window:
+        if not self.use_window:
+            return self.value_subquery(reference_date, self.previous_filter())
+        return self.window(Lag, reference_date)
+
+    def first_value(self, reference_date: timezone.datetime) -> Subquery | Window:
+        """Value at the start of the series: the hub's earliest value date, or —
+        in window mode — the first row the queryset holds for that hub.
+
+        Unlike :meth:`previous_value` this never yields NULL for a row that has
+        a value of its own: the start row's own value is its start value.
+        """
+        if not self.use_window:
+            return self.value_subquery(reference_date, self.hub_filter(), latest=False)
+        # The default window frame of an ordered window is UNBOUNDED PRECEDING
+        # to CURRENT ROW, so FIRST_VALUE is the first row of the partition.
+        return self.window(FirstValue, reference_date)
+
+    def build(self, reference_date: timezone.datetime) -> Subquery | Window:
+        return self.previous_value(reference_date)
+
+
+class TSRelativeChangeSubqueryBuilder(PreviousTSValueSubqueryBuilder):
+    """Relative change of a timeseries satellite field against an earlier value
+    of the same series: ``(current - base) / base``.
+
+    ``is_cumulated`` selects the base value:
+
+    * ``False`` (default) — the preceding value date, giving the change from
+      one entry to the next.  NULL for a series' first entry.
+    * ``True`` — the value at the start of the series, giving the change
+      accumulated since then.  ``0.0`` for the start entry itself.
+
+    Both are determined as described on
+    :class:`PreviousTSValueSubqueryBuilder`, i.e. over the queryset's rows in
+    window mode and over the satellite history otherwise.
+
+    Chaining the stepwise changes yields the cumulated one:
+    ``∏(1 + rᵢ) = ∏(vᵢ / vᵢ₋₁) = v_t / v₀``, so the cumulated change needs no
+    accumulation and is computed directly against the start value.  This holds
+    for a pure value series; it does not account for cash flows in or out of
+    the measured quantity.
+
+    Yields NULL where no base value exists or where it is zero, so no division
+    by zero can occur.
+    """
+
+    is_cumulated: bool = False
+
+    def __init__(self, *args, is_cumulated: bool | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if is_cumulated is not None:
+            self.is_cumulated = is_cumulated
+        self.field_type = FloatField(null=True, blank=True)
+
+    def base_value(self, reference_date: timezone.datetime) -> Subquery | Window:
+        if self.is_cumulated:
+            return self.first_value(reference_date)
+        return self.previous_value(reference_date)
+
+    def build(self, reference_date: timezone.datetime) -> ExpressionWrapper:
+        current = self.value_subquery(reference_date, self.current_filter())
+        base = self.base_value(reference_date)
+        return ExpressionWrapper(
+            (current - base)
+            / NullIf(base, Value(0, output_field=self.value_field_type)),
+            output_field=self.field_type,
+        )
 
 
 class ValueDateSubqueryBuilder(SubqueryBuilder):
