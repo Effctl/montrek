@@ -4,6 +4,9 @@ from user.models import MontrekUser
 
 
 class UserManager(MontrekManager):
-    def get_superuser(self) -> None | MontrekUser:
+    def get_superuser(self) -> MontrekUser:
         user_model = get_user_model()
-        return user_model.objects.filter(is_superuser=True).first()
+        super_user = user_model.objects.filter(is_superuser=True).first()
+        if super_user is None:
+            raise ValueError("No superuser available!")
+        return super_user
