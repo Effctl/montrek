@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
+from collections.abc import Mapping
 
 import pandas as pd
 from baseclasses.dataclasses.montrek_message import MontrekMessageInfo
@@ -44,9 +45,13 @@ class MontrekTableManagerABC(MontrekManager, metaclass=MontrekTableMetaClass):
     document_title = "Montrek Table"
     draft = False
     is_compact_format = False
+    has_table_elements_filter_field: bool = True
     is_large: bool = False
     latex_rows_per_page: int = 25
     excel_formatter_class: type[MontrekExcelFormatter] = MontrekExcelFormatter
+    # Set on first use by ``get_display_field_names``; class level so subclasses
+    # with their own ``__init__`` signature cannot miss it.
+    _table_element_field_names: dict[str, str] | None = None
 
     def __init__(self, session_data: SessionDataType | None = None):
         super().__init__(session_data)
@@ -159,6 +164,28 @@ class MontrekTableManagerABC(MontrekManager, metaclass=MontrekTableMetaClass):
             for table_element in self.table_elements
         ]
         return render_to_string("tables/partials/table_row.html", {"cells": cells})
+
+    def get_all_fields(self) -> list[str]:
+        if not self.has_table_elements_filter_field:
+            return super().get_all_fields()
+        return list(self.get_display_field_names())
+
+    def get_display_field_names(self) -> Mapping[str, str]:
+        """Filterable field -> column header, derived from the table elements.
+
+        Cached: ``table_elements`` may build per-table state and is read by both
+        this method and ``get_all_fields``, which the field choices need together.
+        """
+        if not self.has_table_elements_filter_field:
+            return super().get_display_field_names()
+        if self._table_element_field_names is None:
+            # Elements without a queryset field (icon links) are not filterable.
+            self._table_element_field_names = {
+                field_name: element.name
+                for element in self.table_elements
+                if (field_name := element.field_name)
+            }
+        return self._table_element_field_names
 
     def get_all_display_fields(self) -> list[list[DisplayField]]:
         """All rows (unpaginated) for PDF rendering."""
