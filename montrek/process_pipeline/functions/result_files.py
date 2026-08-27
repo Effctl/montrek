@@ -40,14 +40,19 @@ def build_zip_file(file_paths: list[str], file_name: str) -> ContentFile:
     Raises ``ValueError`` when two paths share a base name: the archive would
     hold two members of the same name and extracting it would silently drop one
     of them, so the export would lose data.
+
+    Will ensure that files are not overwritten but instead stored with
+    a unique name in the zip archive if there are duplicates.
     """
-    arc_names = [os.path.basename(file_path) for file_path in file_paths]
-    duplicates = sorted({name for name in arc_names if arc_names.count(name) > 1})
-    if duplicates:
-        raise ValueError(
-            "Cannot build the archive: these file names occur more than once and "
-            f"would overwrite each other on extraction: {', '.join(duplicates)}."
-        )
+    if not file_paths:
+        raise ValueError("Cannot build an archive without input files.")
+
+    common_root = os.path.commonpath(file_paths)
+    arc_names = [
+        os.path.relpath(file_path, common_root).replace(os.sep, "/")
+        for file_path in file_paths
+    ]
+
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as zip_file:
         for file_path, arc_name in zip(file_paths, arc_names, strict=True):

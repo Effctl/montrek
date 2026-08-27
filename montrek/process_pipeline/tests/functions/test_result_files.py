@@ -35,16 +35,15 @@ class TestBuildZipFile(SimpleTestCase):
         with ZipFile(result) as zip_file:
             self.assertEqual(zip_file.read("first.csv"), b"col1,col2\n")
 
-    def test_rejects_paths_that_share_a_base_name(self):
-        # Both flatten to report.csv, so one would overwrite the other on extraction.
+    def test_keeps_unique_relative_paths_in_zip(self):
         paths = [self._write("a/report.csv"), self._write("b/report.csv")]
 
-        with self.assertRaises(ValueError) as ctx:
-            build_zip_file(paths, "export.zip")
+        result = build_zip_file(paths, "export.zip")
 
-        self.assertIn("report.csv", str(ctx.exception))
+        with ZipFile(result) as zip_file:
+            self.assertEqual(sorted(zip_file.namelist()), ["a/report.csv", "b/report.csv"])
 
-    def test_names_every_collision_in_the_error(self):
+    def test_keeps_multiple_relative_paths_in_zip(self):
         paths = [
             self._write("a/report.csv"),
             self._write("b/report.csv"),
@@ -52,8 +51,15 @@ class TestBuildZipFile(SimpleTestCase):
             self._write("b/summary.csv"),
         ]
 
-        with self.assertRaises(ValueError) as ctx:
-            build_zip_file(paths, "export.zip")
+        result = build_zip_file(paths, "export.zip")
 
-        self.assertIn("report.csv", str(ctx.exception))
-        self.assertIn("summary.csv", str(ctx.exception))
+        with ZipFile(result) as zip_file:
+            self.assertEqual(
+                sorted(zip_file.namelist()),
+                [
+                    "a/report.csv",
+                    "a/summary.csv",
+                    "b/report.csv",
+                    "b/summary.csv",
+                ],
+            )
